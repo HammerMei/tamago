@@ -137,8 +137,12 @@ def setup_gitignore(operation: Operation, project_root: Path):
 # local.conf — stores PROFILE_REPO for memory-sync.sh
 # ---------------------------------------------------------------------------
 
-def write_local_conf(source_root: Path, profile_root: Path | None):
-    """Write (or remove) PROFILE_REPO= in <source_root>/local.conf."""
+def write_local_conf(
+    source_root: Path,
+    profile_root: Path | None,
+    project_root: Path | None = None,
+):
+    """Write (or remove) PROFILE_REPO= and PROJECT_DIR= in <source_root>/local.conf."""
     local_conf = source_root / "local.conf"
 
     if profile_root is None:
@@ -147,13 +151,17 @@ def write_local_conf(source_root: Path, profile_root: Path | None):
             print(f"removed {local_conf}")
         return
 
-    content = f"PROFILE_REPO={profile_root.resolve()}\n"
+    lines = [f"PROFILE_REPO={profile_root.resolve()}"]
+    if project_root is not None:
+        lines.append(f"PROJECT_DIR={project_root.resolve()}")
+    content = "\n".join(lines) + "\n"
+
     if local_conf.exists() and local_conf.read_text() == content:
         print(f"exists  {local_conf}")
         return
 
     local_conf.write_text(content)
-    print(f"updated {local_conf}  (PROFILE_REPO={profile_root.resolve()})")
+    print(f"updated {local_conf}")
 
 
 # ---------------------------------------------------------------------------
@@ -439,15 +447,41 @@ def run_health_check(source_root: Path, project_root: Path) -> None:
     )
 
 
+def setup_git_hooks(operation: Operation, source_root: Path) -> None:
+    """Install/remove tamago's git hooks into source_root/.git/hooks/."""
+    git_hooks_dir = source_root / ".git" / "hooks"
+    source_hooks_dir = source_root / "git-hooks"
+
+    if not source_hooks_dir.is_dir():
+        return
+
+    hook_files = sub_paths(source_hooks_dir, lambda p: p.is_file())
+
+    if operation == Operation.INSTALL:
+        git_hooks_dir.mkdir(parents=True, exist_ok=True)
+        symlink_paths(hook_files, git_hooks_dir)
+    elif operation == Operation.UNINSTALL:
+        unlink_paths(hook_files, git_hooks_dir)
+
+
 def setup_global(operation: Operation, source_root: Path) -> int:
-    """Home-level install: symlink to ~/.claude and ~/.opencode, update ~/.zshrc."""
-    try:
-        setup_global_settings(operation, source_root)
-        setup_shell_env(operation, source_root)
-        return 0
-    except Exception as e:
-        print(e, file=sys.stderr)
-        return 1
+    """Home-level install: symlink to ~/.claude and ~/.opencode, update ~/.zshrc,
+    and install tamago's own git hooks.
+    Each step runs independently — one failure does not block the others."""
+    errors: list[str] = []
+
+    for step in (
+        lambda: setup_global_settings(operation, source_root),
+        lambda: setup_shell_env(operation, source_root),
+        lambda: setup_git_hooks(operation, source_root),
+    ):
+        try:
+            step()
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
+
+    return 1 if errors else 0
 
 
 def setup(
@@ -463,9 +497,9 @@ def setup(
         setup_agents(operation, source_root, project_root, profile_root)
         setup_settings(operation, source_root, project_root, profile_root)
 
-        # Record (or remove) PROFILE_REPO in local.conf so memory-sync.sh can find it
+        # Record (or remove) PROFILE_REPO + PROJECT_DIR in local.conf
         if operation == Operation.INSTALL:
-            write_local_conf(source_root, profile_root)
+            write_local_conf(source_root, profile_root, project_root)
             run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
             write_local_conf(source_root, None)
