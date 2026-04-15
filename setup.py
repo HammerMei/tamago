@@ -199,15 +199,84 @@ def setup_global_settings(operation: Operation, source_root: Path):
 # Agents & memory
 # ---------------------------------------------------------------------------
 
+GENERATED_HEADER_MARKER = "<!-- TAMAGO GENERATED"
+
+
+def _merge_agent(
+    source_root: Path,
+    profile_root: Path,
+    persona_file: Path,
+    target_dir: Path,
+) -> None:
+    """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md."""
+    # agent_name: strip the ".persona" suffix  (hammer.mei.persona.md → hammer.mei)
+    agent_name = persona_file.stem  # e.g. "hammer.mei.persona"
+    if agent_name.endswith(".persona"):
+        agent_name = agent_name[: -len(".persona")]
+
+    base_file = source_root / "docs" / "tamago-agent-base.md"
+    if not base_file.exists():
+        raise Exception(f"tamago-agent-base.md not found: {base_file}")
+
+    profile_path = str(profile_root.resolve())
+    memory_path = f"{profile_path}/agents/memory/{agent_name}"
+
+    def _sub(text: str) -> str:
+        return (
+            text.replace("{{AGENT_NAME}}", agent_name)
+                .replace("{{PROFILE_REPO}}", profile_path)
+                .replace("{{AGENT_MEMORY_PATH}}", memory_path)
+        )
+
+    base_content = _sub(base_file.read_text())
+    persona_raw = persona_file.read_text()
+
+    # Split persona file into frontmatter + body
+    frontmatter, body = "", persona_raw
+    if persona_raw.startswith("---"):
+        parts = persona_raw.split("---", 2)
+        if len(parts) >= 3:
+            frontmatter = "---" + parts[1] + "---\n"
+            body = parts[2].lstrip("\n")
+
+    header = (
+        f"{GENERATED_HEADER_MARKER} — DO NOT EDIT DIRECTLY\n"
+        f"     Sources:\n"
+        f"       mechanics : tamago/docs/tamago-agent-base.md\n"
+        f"       persona   : profile/agents/{persona_file.name}\n"
+        f"     Regenerate  : python3 setup.py install --profile {profile_path}\n"
+        f"-->\n\n"
+    )
+
+    merged = frontmatter + header + base_content + "\n\n---\n\n" + body
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output = target_dir / f"{agent_name}.md"
+    output.write_text(merged)
+    print(f"merged  {output}")
+
+
+def _remove_generated_agents(profile_root: Path, target_dir: Path) -> None:
+    """Remove generated agent .md files from target_dir."""
+    if not (profile_root / "agents").is_dir():
+        return
+    for persona_file in (profile_root / "agents").iterdir():
+        if not (persona_file.is_file() and persona_file.suffix == ".md"):
+            continue
+        stem = persona_file.stem
+        agent_name = stem[: -len(".persona")] if stem.endswith(".persona") else stem
+        target = target_dir / f"{agent_name}.md"
+        if target.exists() and GENERATED_HEADER_MARKER in target.read_text()[:300]:
+            target.unlink()
+            print(f"removed {target}")
+
+
 def setup_agents(
     operation: Operation,
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
 ):
-    # Agent persona .md files: prefer profile, fall back to tamago's generic agents
-    agent_source = profile_root if profile_root else source_root
-    source_agent_root = agent_source / "agents"
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
     target_claude_agent_root = project_root / ".claude" / "agents"
@@ -215,19 +284,37 @@ def setup_agents(
     target_opencode_agent_root = project_root / ".opencode" / "agents"
     target_opencode_plugin_root = project_root / ".opencode" / "plugins"
 
-    agent_md_files = sub_paths(
-        source_agent_root, lambda p: p.is_file() and p.suffix == ".md"
-    )
     opencode_plugin_files = sub_paths(
         source_opencode_plugin_root, lambda p: p.is_file() and p.suffix == ".ts"
     )
 
+    # Generic agents from tamago (code-reviewer.md, technical-writer.md, etc.)
+    tamago_agent_files = sub_paths(
+        source_root / "agents", lambda p: p.is_file() and p.suffix == ".md"
+    )
+
     if operation == Operation.INSTALL:
-        symlink_paths(agent_md_files, target_claude_agent_root)
-        symlink_paths(agent_md_files, target_opencode_agent_root)
+        # 1. Symlink tamago generic agents
+        symlink_paths(tamago_agent_files, target_claude_agent_root)
+        symlink_paths(tamago_agent_files, target_opencode_agent_root)
         symlink_paths(opencode_plugin_files, target_opencode_plugin_root)
 
-        # Memory dirs live in the profile repo (if given), otherwise tamago
+        # 2. Merge persona agents from profile (*.persona.md → generated *.md)
+        #    Plain *.md files in profile/agents/ are symlinked directly.
+        if profile_root and (profile_root / "agents").is_dir():
+            profile_agent_files = sub_paths(
+                profile_root / "agents",
+                lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
+            )
+            symlink_paths(profile_agent_files, target_claude_agent_root)
+            symlink_paths(profile_agent_files, target_opencode_agent_root)
+
+            for persona_file in sorted((profile_root / "agents").iterdir()):
+                if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
+                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root)
+                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root)
+
+        # 3. Memory dirs from profile (or tamago fallback)
         if profile_root and (profile_root / "agents" / "memory").is_dir():
             mem_source = profile_root / "agents" / "memory"
         elif (source_root / "agents" / "memory").is_dir():
@@ -240,11 +327,22 @@ def setup_agents(
             symlink_paths(agent_mem_dirs, target_claude_agent_mem_root)
 
     elif operation == Operation.UNINSTALL:
-        unlink_paths(agent_md_files, target_claude_agent_root)
-        unlink_paths(agent_md_files, target_opencode_agent_root)
+        unlink_paths(tamago_agent_files, target_claude_agent_root)
+        unlink_paths(tamago_agent_files, target_opencode_agent_root)
         unlink_paths(opencode_plugin_files, target_opencode_plugin_root)
 
-        # Remove memory symlinks (best effort — identify by what exists)
+        # Remove symlinked plain profile agents and generated persona agents
+        if profile_root and (profile_root / "agents").is_dir():
+            profile_agent_files = sub_paths(
+                profile_root / "agents",
+                lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
+            )
+            unlink_paths(profile_agent_files, target_claude_agent_root)
+            unlink_paths(profile_agent_files, target_opencode_agent_root)
+            _remove_generated_agents(profile_root, target_claude_agent_root)
+            _remove_generated_agents(profile_root, target_opencode_agent_root)
+
+        # Remove memory symlinks
         mem_source = (
             (profile_root / "agents" / "memory") if profile_root
             else (source_root / "agents" / "memory")
