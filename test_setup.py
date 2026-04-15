@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,6 +164,94 @@ class SetupGitignoreTests(unittest.TestCase):
             setup_module.setup_gitignore(setup_module.Operation.UNINSTALL, project_root)
 
             self.assertEqual(gitignore.read_text(), "")
+
+
+class RunHealthCheckTests(unittest.TestCase):
+    def test_skips_when_script_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir)
+            project_root = Path(temp_dir)
+            # scripts/health-check.sh does not exist in temp_dir
+            output = io.StringIO()
+            with (
+                contextlib.redirect_stdout(output),
+                mock.patch("subprocess.run") as run_mock,
+            ):
+                setup_module.run_health_check(source_root, project_root)
+
+            run_mock.assert_not_called()
+            self.assertIn("skip", output.getvalue())
+
+    def test_runs_health_check_when_script_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir)
+            scripts_dir = source_root / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "health-check.sh").write_text("#!/bin/bash\necho ok")
+
+            project_root = Path(temp_dir)
+            with mock.patch("subprocess.run") as run_mock:
+                run_mock.return_value = mock.Mock(returncode=0)
+                setup_module.run_health_check(source_root, project_root)
+
+            run_mock.assert_called_once_with(
+                ["bash", str(source_root / "scripts" / "health-check.sh"),
+                 "--project", str(project_root)],
+                check=False,
+            )
+
+    def test_does_not_raise_when_health_check_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir)
+            scripts_dir = source_root / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "health-check.sh").write_text("#!/bin/bash\nexit 1")
+
+            project_root = Path(temp_dir)
+            with mock.patch("subprocess.run") as run_mock:
+                run_mock.return_value = mock.Mock(returncode=1)
+                # Should not raise
+                setup_module.run_health_check(source_root, project_root)
+
+
+class SetupHealthCheckIntegrationTests(unittest.TestCase):
+    def _make_minimal_source(self, temp_dir: str) -> tuple[Path, Path]:
+        """Create a minimal tamago source and project root for setup() calls."""
+        source_root = Path(temp_dir) / "tamago"
+        project_root = Path(temp_dir) / "project"
+        project_root.mkdir(parents=True)
+
+        # Minimal source structure setup() needs
+        for subdir in ["skills", "agents", "settings/claude", "settings/opencode",
+                       "settings/opencode/plugins"]:
+            (source_root / subdir).mkdir(parents=True)
+        (source_root / "settings" / "claude" / "settings.json").write_text("{}")
+        (source_root / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+        return source_root, project_root
+
+    def test_setup_calls_health_check_on_install(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root, project_root = self._make_minimal_source(temp_dir)
+
+            with mock.patch.object(setup_module, "run_health_check") as hc_mock:
+                result = setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root
+                )
+
+            self.assertEqual(result, 0)
+            hc_mock.assert_called_once_with(source_root, project_root)
+
+    def test_setup_does_not_call_health_check_on_uninstall(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root, project_root = self._make_minimal_source(temp_dir)
+
+            with mock.patch.object(setup_module, "run_health_check") as hc_mock:
+                setup_module.setup(
+                    setup_module.Operation.UNINSTALL, source_root, project_root
+                )
+
+            hc_mock.assert_not_called()
 
 
 class MainTests(unittest.TestCase):

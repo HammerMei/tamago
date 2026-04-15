@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 from collections.abc import Callable
@@ -326,6 +327,20 @@ def setup_shell_env(operation: Operation, source_root: Path):
 # Top-level orchestrators
 # ---------------------------------------------------------------------------
 
+def run_health_check(source_root: Path, project_root: Path) -> None:
+    """Run health-check.sh after install to surface any environment issues."""
+    health_check = source_root / "scripts" / "health-check.sh"
+    if not health_check.exists():
+        print("skip    health check (scripts/health-check.sh not found)")
+        return
+
+    print("\n" + "─" * 60)
+    subprocess.run(
+        ["bash", str(health_check), "--project", str(project_root)],
+        check=False,
+    )
+
+
 def setup_global(operation: Operation, source_root: Path) -> int:
     """Home-level install: symlink to ~/.claude and ~/.opencode, update ~/.zshrc."""
     try:
@@ -353,6 +368,7 @@ def setup(
         # Record (or remove) PROFILE_REPO in local.conf so memory-sync.sh can find it
         if operation == Operation.INSTALL:
             write_local_conf(source_root, profile_root)
+            run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
             write_local_conf(source_root, None)
 
