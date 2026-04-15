@@ -1,0 +1,82 @@
+[
+  {
+    "query": "ok i just got the daily briefing summary back, can you read it aloud to me? i'm cooking right now and can't look at the screen",
+    "should_trigger": true
+  },
+  {
+    "query": "朗讀一下這段文字給我聽：「今天天氣晴朗，適合出門散步」",
+    "should_trigger": true
+  },
+  {
+    "query": "hey can you speak this message out loud using the Yue voice — i want to test if it sounds natural before i send it",
+    "should_trigger": true
+  },
+  {
+    "query": "唸出來：今天的午餐食譜步驟，用慢一點的速度，我要邊聽邊煮",
+    "should_trigger": true
+  },
+  {
+    "query": "list all the voices available on my mac for chinese, specifically traditional chinese zh-TW",
+    "should_trigger": true
+  },
+  {
+    "query": "can you read this news article summary to me in english? the text is pretty long, like 3 paragraphs",
+    "should_trigger": true
+  },
+  {
+    "query": "my response should be spoken aloud — i'm in the daily-briefing persona and all responses must be voiced",
+    "should_trigger": true
+  },
+  {
+    "query": "speak this using the Meijia voice at 1.1x speed: 最新股市消息，今日 NVDA 上漲 3%",
+    "should_trigger": true
+  },
+  {
+    "query": "i want to use tts for this recipe step walkthrough — it's about 800 chars long, use voice Samantha",
+    "should_trigger": true
+  },
+  {
+    "query": "play back this content — write it to a temp file first if needed, then use tts-cli.js to speak it",
+    "should_trigger": true
+  },
+  {
+    "query": "can you transcribe this audio file i recorded? it's a voice memo from my iphone called meeting-notes.m4a",
+    "should_trigger": false
+  },
+  {
+    "query": "i want to add voice narration to my youtube video — what software do you recommend for ai voiceover generation?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i configure macos accessibility to read selected text when i press a keyboard shortcut?",
+    "should_trigger": false
+  },
+  {
+    "query": "write me a python script that calls openai's tts api to convert a text file to mp3",
+    "should_trigger": false
+  },
+  {
+    "query": "my node.js app needs to play a sound effect when a button is clicked — how do i do audio playback in electron?",
+    "should_trigger": false
+  },
+  {
+    "query": "explain to me how the say command works on macos — what voices does it support and what are the flags?",
+    "should_trigger": false
+  },
+  {
+    "query": "can you read this code out loud? just paste the function definition and explain each line verbally",
+    "should_trigger": false
+  },
+  {
+    "query": "hey can you convert this podcast transcript to audio? i need an mp3 file to upload to buzzsprout",
+    "should_trigger": false
+  },
+  {
+    "query": "i'm building an ios app and need to implement AVSpeechSynthesizer for in-app tts — can you show me the swift code?",
+    "should_trigger": false
+  },
+  {
+    "query": "my espeak installation on ubuntu keeps producing robotic output for chinese text — how do i fix the voice quality?",
+    "should_trigger": false
+  }
+]

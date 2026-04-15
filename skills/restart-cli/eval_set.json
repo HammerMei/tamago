@@ -1,0 +1,82 @@
+[
+  {
+    "query": "this claude session is getting super slow and laggy, can you restart it and then tell it to continue the refactor we were doing on auth.py?",
+    "should_trigger": true
+  },
+  {
+    "query": "重啟一下 claude 然後繼續幫我整這個 API 功能，我用 iTerm2",
+    "should_trigger": true
+  },
+  {
+    "query": "context is almost full i think, can u just restart and pass it the message 'keep going on the dashboard feature'",
+    "should_trigger": true
+  },
+  {
+    "query": "please reload the current claude code session using claude -c",
+    "should_trigger": true
+  },
+  {
+    "query": "i want a fresh session. kill this one and start over with cc",
+    "should_trigger": true
+  },
+  {
+    "query": "hey can you restart yourself? the session feels stuck and i want to reset the context",
+    "should_trigger": true
+  },
+  {
+    "query": "restart the agent and after it boots up tell it to run the test suite again",
+    "should_trigger": true
+  },
+  {
+    "query": "my mac is running iTerm2, can you fire up a new claude -c session and resume our work?",
+    "should_trigger": true
+  },
+  {
+    "query": "let's do a clean restart — i want to pick up where we left off but in a new session",
+    "should_trigger": true
+  },
+  {
+    "query": "kill the current session and reopen with opencode, then send 'continue refactoring routes.js'",
+    "should_trigger": true
+  },
+  {
+    "query": "my node.js dev server keeps crashing, can you write a shell script to auto-restart it?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i write an applescript to open a new terminal window and run a command?",
+    "should_trigger": false
+  },
+  {
+    "query": "restart the docker container for my postgres database",
+    "should_trigger": false
+  },
+  {
+    "query": "my ssh session got disconnected, how do i reconnect and resume my screen/tmux session?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i send SIGTERM to a background python process from the command line?",
+    "should_trigger": false
+  },
+  {
+    "query": "i want to configure iTerm2 to automatically open with a specific profile and working directory on startup",
+    "should_trigger": false
+  },
+  {
+    "query": "help me set up a systemd service that restarts my flask app if it crashes",
+    "should_trigger": false
+  },
+  {
+    "query": "can you restart the rails server? i edited an initializer and it needs a reload",
+    "should_trigger": false
+  },
+  {
+    "query": "the terminal is showing weird colors after i ran a script — how do i reset the terminal state without closing it?",
+    "should_trigger": false
+  },
+  {
+    "query": "i accidentally filled up my shell history with a loop, can you clear it or start a new shell session in the same window?",
+    "should_trigger": false
+  }
+]

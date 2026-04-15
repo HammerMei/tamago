@@ -1,0 +1,20 @@
+{
+  "defaultLang": "en-US",
+  "defaultRate": 1,
+  "preferPremiumOrEnhancedVoice": true,
+  "localePreferenceByLanguage": {
+    "zh": ["zh-TW", "zh-HK", "zh-CN"],
+    "en": ["en-US", "en-GB", "en-AU", "en-IN"],
+    "ja": ["ja-JP"],
+    "ko": ["ko-KR"],
+    "es": ["es-US", "es-MX", "es-ES"]
+  },
+  "voicePreferenceByLocale": {
+    "zh-TW": ["Meijia"],
+    "en-US": ["Samantha"],
+    "ja-JP": ["Kyoko"],
+    "ko-KR": ["Yuna"],
+    "es-MX": ["Paulina"],
+    "es-ES": ["Mónica"]
+  }
+}
