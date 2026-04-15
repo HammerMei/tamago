@@ -435,7 +435,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parent
+    project_root = Path.cwd()
 
     try:
         source_override = (

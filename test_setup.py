@@ -178,7 +178,7 @@ class MainTests(unittest.TestCase):
         setup_mock.assert_called_once_with(
             setup_module.Operation.INSTALL,
             Path(temp_dir),
-            setup_module.Path(setup_module.__file__).resolve().parent,
+            Path.cwd(),  # project_root = Path.cwd()
             None,  # profile_root
         )
 
@@ -194,7 +194,7 @@ class MainTests(unittest.TestCase):
         setup_mock.assert_called_once_with(
             setup_module.Operation.INSTALL,
             Path(temp_dir),
-            setup_module.Path(setup_module.__file__).resolve().parent,
+            Path.cwd(),  # project_root = Path.cwd()
             None,  # profile_root
         )
 
