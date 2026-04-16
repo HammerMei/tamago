@@ -752,6 +752,19 @@ def main() -> int:
         print(e, file=sys.stderr)
         return 1
 
+    # Uninstall fallback: if no profile flag given, read PROFILE_REPO from local.conf
+    # so the user doesn't need to remember which profile was installed here.
+    if profile_root is None and args.command == Operation.UNINSTALL.value:
+        local_conf = source_root / "local.conf"
+        if local_conf.exists():
+            for line in local_conf.read_text().splitlines():
+                if line.startswith("PROFILE_REPO="):
+                    candidate = Path(line.split("=", 1)[1].strip())
+                    if candidate.is_dir():
+                        profile_root = candidate
+                        print(f"info    using PROFILE_REPO from local.conf: {profile_root}")
+                    break
+
     for op in Operation:
         if args.command == op.value:
             memory_sync = not getattr(args, "no_memory_sync", False)
