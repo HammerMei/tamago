@@ -1,0 +1,92 @@
+---
+name: hatch
+description: >
+  Guided creation of a new tamago agent profile — persona, memory scaffold,
+  settings, and optional git repo. Trigger when the user says "hatch an agent",
+  "create a new agent", or wants to set up a new assistant persona.
+---
+
+# Skill: hatch
+
+Scaffold a new tamago agent profile through a short guided conversation,
+then materialize the files via `hatch.py`.
+
+## What gets created
+
+```
+<profile-dir>/
+  .gitignore
+  agents/
+    <name>.persona.md          ← persona + optional TTS instructions
+    memory/<name>/MEMORY.md    ← empty memory index
+  settings/
+    claude/settings.json       ← {"agent": "<name>"}
+    opencode/opencode.json     ← {"default_agent": "<name>"}
+```
+
+## Conversation flow
+
+### Turn 1 — gather and propose
+
+List available tamago skills first:
+
+```bash
+ls ~/workspace/tamago/skills/
+```
+
+Then present a single table with proposed defaults and ask the user to confirm or revise:
+
+| Field | Default / Proposed |
+|-------|--------------------|
+| `--name` | slug from user's idea, e.g. `xiao.mei` |
+| `--display-name` | display name, e.g. `小小妹` |
+| `--description` | one sentence summary |
+| `--language` | `Traditional Chinese` |
+| `--tone` | `Friendly and helpful` |
+| `--user-address` | `老哥` |
+| `--profile-dir` | `~/workspace/<name>-profile` |
+| `--remote` | (none — skip for local-only) |
+| TTS enabled | no |
+| `--tts-voice` | `Meijia` (zh-TW) / `Samantha` (en-US), only if TTS enabled |
+| `--skills` | `text-to-speech` (if TTS), else none |
+
+### Turn 2 — user confirms or revises values
+
+### Turn 3 — run hatch.py
+
+```bash
+python3 .claude/skills/hatch/hatch.py \
+  --name "<name>" \
+  --display-name "<display-name>" \
+  --description "<description>" \
+  --language "<language>" \
+  --tone "<tone>" \
+  --user-address "<user-address>" \
+  --profile-dir "<profile-dir>" \
+  [--remote "<url>"] \
+  [--tts [--tts-voice "<voice>"]] \
+  [--skills "<s1>,<s2>"] \
+  --install
+```
+
+`--install` runs `python3 setup.py install --profile <profile-dir>` in the current
+project directory automatically.
+
+## After success
+
+1. Tell the user: **restart Claude to activate the new agent**
+2. If `--remote` was set: remind them to push:
+   ```bash
+   cd <profile-dir> && git push -u origin main
+   ```
+3. Let them know the persona lives at:
+   `<profile-dir>/agents/<name>.persona.md`
+   and can be regenerated after edits with:
+   `python3 ~/workspace/tamago/setup.py install --profile <profile-dir>`
+
+## Error handling
+
+- **Profile dir exists and is non-empty**: ask user for a different `--profile-dir`
+- **hatch.py exits non-zero**: show the error message; do not silently skip
+- **setup.py install fails**: report the error; the profile files were still created
+  and the user can run install manually

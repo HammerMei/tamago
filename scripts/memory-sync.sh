@@ -32,7 +32,16 @@ fi
 case "$1" in
   --init)
     HOSTNAME=$(hostname)
-    ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/hammer.mei/env-$HOSTNAME"
+
+    # Determine agent name from profile's settings.json (falls back to hammer.mei)
+    AGENT_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
+    if [ -f "$AGENT_SETTINGS" ]; then
+      AGENT_NAME=$(python3 -c "import json; print(json.load(open('$AGENT_SETTINGS')).get('agent','hammer.mei'))" 2>/dev/null || echo "hammer.mei")
+    else
+      AGENT_NAME="hammer.mei"
+    fi
+
+    ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/$AGENT_NAME/env-$HOSTNAME"
 
     # 1. Ensure env dir exists
     if [ ! -d "$ENV_DIR" ]; then
