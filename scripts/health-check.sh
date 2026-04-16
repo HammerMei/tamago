@@ -313,10 +313,10 @@ else
     printf "${YELLOW}Health check passed with warnings.${NC}"
     [ "$FIX" = false ] && printf " Run with --fix to auto-fix where possible."
     printf "\n\n"
-    printf "${YELLOW}🔨 This tamago is provisionally certified by Hammer Mei.${NC}\n\n"
+    printf "${YELLOW}🔨🥚 鐵鎚老妹鎚過，有點壞但還能用。${NC}\n\n"
   else
     printf "${GREEN}All checks passed 🎉${NC}\n\n"
-    printf "${GREEN}🔨 This tamago is certified by Hammer Mei.${NC}\n\n"
+    printf "${GREEN}🔨🥚 鐵鎚老妹鎚過，沒有壞，認證通過！${NC}\n\n"
   fi
 fi
 
