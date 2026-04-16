@@ -146,7 +146,7 @@ run_timed() {
 # ─── Header ───────────────────────────────────────────────────────────────────
 
 if [ "$JSON" = false ]; then
-  printf "\n${BOLD}🔨 Hammer Mei — Deployment Health Check${NC}\n"
+  printf "\n${BOLD}🥚 tamago — Deployment Health Check${NC}\n"
   printf "tamago:  %s\n" "$REPO"
   printf "profile: %s\n" "$PROFILE_REPO"
   printf "project: %s\n" "$PROJECT_DIR"
@@ -313,8 +313,10 @@ else
     printf "${YELLOW}Health check passed with warnings.${NC}"
     [ "$FIX" = false ] && printf " Run with --fix to auto-fix where possible."
     printf "\n\n"
+    printf "${YELLOW}🔨 This tamago is provisionally certified by Hammer Mei.${NC}\n\n"
   else
     printf "${GREEN}All checks passed 🎉${NC}\n\n"
+    printf "${GREEN}🔨 This tamago is certified by Hammer Mei.${NC}\n\n"
   fi
 fi
 
