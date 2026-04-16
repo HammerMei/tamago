@@ -675,13 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="short name, e.g. 'hammer.mei' — resolves to <tamago>/hammer.mei-profile/",
     )
-    # Deprecated alias kept for backward compatibility
-    profile_group.add_argument(
-        "--profile",
-        dest="profile_dir",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
+
     profile_parser.add_argument(
         "--no-memory-sync",
         dest="no_memory_sync",
