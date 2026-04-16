@@ -46,6 +46,7 @@ Then present a single table with proposed defaults and ask the user to confirm o
 | `--language` | `Traditional Chinese` |
 | `--tone` | `Friendly and helpful` |
 | `--user-address` | `老哥` |
+| `--gender` | `女` / `男` / `不詳` |
 | `--profile-dir` | `~/.tamago/<name>-profile` |
 | `--remote` | (none — skip for local-only) |
 | TTS enabled | no |

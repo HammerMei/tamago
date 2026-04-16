@@ -89,6 +89,7 @@ def build_birth_certificate(
     *,
     agent_name: str,
     display_name: str,
+    gender: str,
     birth_dt: datetime.datetime,
     hatcher: str,
     lineage: str,
@@ -116,9 +117,11 @@ def build_birth_certificate(
             "| **tamago DNA** | `{{tamago_dna}}` |\n"
         )
 
+    _gender_display = {"女": "女 ♀", "男": "男 ♂", "不詳": "不詳 ⚧"}.get(gender, gender or "不詳 ⚧")
     variables = {
         "agent_name": agent_name,
         "display_name": display_name,
+        "gender": _gender_display,
         "birth_datetime": birth_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "chinese_zodiac": chinese_zodiac(birth_dt.year),
         "western_zodiac": western_zodiac(birth_dt.month, birth_dt.day),
@@ -183,6 +186,7 @@ def create_profile(
     language: str,
     tone: str,
     user_address: str,
+    gender: str,
     profile_dir: Path,
     remote: str | None,
     tts: bool,
@@ -255,6 +259,7 @@ def create_profile(
     birth_cert_content = build_birth_certificate(
         agent_name=name,
         display_name=display_name,
+        gender=gender,
         birth_dt=birth_dt,
         hatcher=hatcher,
         lineage=lineage,
@@ -276,7 +281,8 @@ def create_profile(
         print("🥚 DRY RUN — no files will be written\n")
         for path, _ in files:
             print(f"  create  {path}")
-        print(f"\n  birth_datetime : {birth_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"\n  gender         : {gender or '不詳'}")
+        print(f"  birth_datetime : {birth_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"  chinese_zodiac : {chinese_zodiac(birth_dt.year)}")
         print(f"  western_zodiac : {western_zodiac(birth_dt.month, birth_dt.day)}")
         print(f"  hostname       : {socket.gethostname()}")
@@ -368,6 +374,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory where the profile repo will be created",
     )
     p.add_argument(
+        "--gender", default="不詳",
+        choices=["女", "男", "不詳"],
+        help="Agent gender for birth certificate (default: 不詳)",
+    )
+    p.add_argument(
         "--remote", default=None,
         help="Git remote URL to set as origin (optional)",
     )
@@ -448,6 +459,7 @@ def main() -> int:
             language=args.language,
             tone=args.tone,
             user_address=args.user_address,
+            gender=args.gender,
             profile_dir=profile_dir,
             remote=args.remote,
             tts=args.tts,
