@@ -52,7 +52,28 @@ Then present a single table with proposed defaults and ask the user to confirm o
 
 ### Turn 2 — user confirms or revises values
 
-### Turn 3 — run hatch.py
+### Turn 3 — clarify install target, then run hatch.py
+
+> ⚠️ **One profile per project (current limitation)**
+> Running `--install` in the current project replaces the active agent — the current
+> profile's `settings.json` symlink and `local.conf` will be overwritten.
+> If the user wants to hatch a sibling agent alongside the current one, they need a
+> **separate project directory**.
+
+Ask the user **before running** with `--install`:
+> "Where should this agent be installed?
+> - **Current project** (`<cwd>`) — replaces the active agent here
+> - **New project dir** — I'll hatch the profile and give you the install command to run there"
+
+If they choose a **new project dir**: run hatch **without** `--install`, then output:
+```bash
+mkdir -p <project-dir>
+cd <project-dir>
+python3 ~/workspace/tamago/setup.py install-global   # if not done yet
+python3 ~/workspace/tamago/setup.py install --profile <profile-dir>
+```
+
+If they choose the **current project**: proceed with `--install`:
 
 ```bash
 python3 .claude/skills/hatch/hatch.py \
@@ -69,9 +90,6 @@ python3 .claude/skills/hatch/hatch.py \
   [--no-memory-sync] \
   --install
 ```
-
-`--install` runs `python3 setup.py install --profile <profile-dir>` in the current
-project directory automatically.
 
 If no `--remote` is given, add `--no-memory-sync` to disable git memory sync and avoid
 false failures in the health check. The user can enable sync later by removing
