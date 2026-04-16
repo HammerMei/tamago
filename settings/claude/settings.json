@@ -12,7 +12,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}/scripts/memory-sync.sh --init claude-code"
+            "command": "${ASSISTANT_SETUP_REPO:-$HOME/.tamago}/scripts/memory-sync.sh --init claude-code"
           }
         ]
       }
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}/scripts/memory-sync.sh --pull"
+            "command": "${ASSISTANT_SETUP_REPO:-$HOME/.tamago}/scripts/memory-sync.sh --pull"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}/scripts/memory-sync.sh --push"
+            "command": "${ASSISTANT_SETUP_REPO:-$HOME/.tamago}/scripts/memory-sync.sh --push"
           }
         ]
       }
