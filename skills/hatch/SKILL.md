@@ -18,9 +18,10 @@ then materialize the files via `hatch.py`.
   .gitignore
   agents/
     <name>.persona.md                    ← persona + optional TTS instructions
-    memory/<name>/MEMORY.md              ← memory index (with birth_certificate pointer)
+    memory/<name>/MEMORY.md              ← memory index
     memory/<name>/birth_certificate.md   ← 🥚 easter egg: birth timestamp, zodiac,
                                             hostname, hatcher lineage, tamago DNA
+    memory/<name>/<topic>.md             ← (optional) imported memory topic files
   settings/
     claude/settings.json       ← {"agent": "<name>"}
     opencode/opencode.json     ← {"default_agent": "<name>"}
@@ -54,6 +55,18 @@ Then present a single table with proposed defaults and ask the user to confirm o
 | `--skills` | `text-to-speech` (if TTS), else none |
 
 ### Turn 2 — user confirms or revises values
+
+Also ask at the end of Turn 2:
+
+> **「有沒有 source files 想 import 進 `<name>` 的初始記憶？**
+> 可以給我：
+> - 目錄路徑（我去掃裡面的檔案）
+> - 一或多個檔案路徑
+> - 直接把內容貼進來
+>
+> 沒有的話跳過就好。」
+
+If the user provides sources, note them down — memory import runs **after** hatch.py in Turn 4.
 
 ### Turn 3 — clarify install target, then run hatch.py
 
@@ -114,6 +127,62 @@ Before running `hatch.py`, resolve the birth lineage:
 If no `--remote` is given, add `--no-memory-sync` to disable git memory sync and avoid
 false failures in the health check. The user can enable sync later by removing
 `MEMORY_SYNC=0` from `local.conf` after setting up a remote.
+
+### Turn 4 — memory import (only if user provided sources)
+
+If the user gave source files or a directory in Turn 2, run the import now:
+
+**Step 1 — read all sources**
+- If a directory path: use Glob to list files, then Read each one
+- If file paths: Read each one directly
+- If pasted content: already in context
+
+**Step 2 — synthesize into memory topic files**
+
+For each chunk of content, decide which memory topic it belongs to. Use the
+[standard memory types](https://claude.ai) as a guide:
+
+| Content type | Suggested memory file |
+|---|---|
+| Personal diary, reflections, daily life | `diary.md` |
+| User preferences, background, personality | `user_profile.md` |
+| Work style, expertise, skills | `work_style.md` |
+| Past feedback or corrections | `feedback.md` |
+| Project context, ongoing work | `project_notes.md` |
+| Anything else | create a sensibly named file |
+
+It's fine to create custom topic files beyond the list above — name them for the content.
+
+**Step 3 — write the files**
+
+Write each topic file to `<profile-dir>/agents/memory/<name>/` using this frontmatter:
+
+```markdown
+---
+name: <Topic Name>
+description: <one-line description of what's in here>
+type: user | feedback | project | reference
+---
+
+<synthesized content — organized, not a raw dump>
+```
+
+Synthesize and organize — don't paste raw source text. Preserve voice and personality
+where relevant (especially for diary or persona content).
+
+**Step 4 — update MEMORY.md index**
+
+Append a pointer line for each new file to `<profile-dir>/agents/memory/<name>/MEMORY.md`:
+```
+- [Topic Name](filename.md) — one-line description
+```
+
+**Step 5 — commit**
+
+```bash
+git -C "<profile-dir>" add agents/memory/
+git -C "<profile-dir>" commit -m "memory: import initial memories from source files"
+```
 
 ## After success
 

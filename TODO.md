@@ -19,14 +19,21 @@ Proposed directions:
 
 Favourite combo: **C + D** 🔥
 
-### Memory Seeding on Hatch
+### Memory Import on Hatch ✅ (implemented in SKILL.md)
+During hatch Turn 2, ask the user for source files to import into the new agent's memory.
+The running agent (LLM) reads the sources, synthesizes and organizes content into topic
+files (`diary.md`, `user_profile.md`, `work_style.md`, etc.), writes them into the memory
+dir, updates MEMORY.md, and commits.
+
+- Input: directory path, file paths, or pasted content — all handled by the agent via Read/Glob
+- colleague-skill output SKILL.md is also a valid import source
+
+### Memory Seeding from Parent Agent
 When hatching a new agent for the same user, let the running agent (e.g. hammer.mei)
 read its own memory and synthesize a `user_profile.md` to gift to the new agent —
 so the new agent knows the user from day one.
 
-Two sub-options still to decide:
-- Auto-populate from running agent's existing memory (seamless, no extra questions)
-- Or ask the user a couple of targeted questions during hatch
+Decision: auto-populate from running agent's existing memory (no extra questions — seamless).
 
 ---
 
