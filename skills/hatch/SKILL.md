@@ -28,10 +28,10 @@ then materialize the files via `hatch.py`.
 
 ### Turn 1 — gather and propose
 
-List available tamago skills first:
+List available tamago skills first (use the project-scoped symlink — no approval needed):
 
 ```bash
-ls ~/.tamago/skills/
+ls .claude/skills/
 ```
 
 Then present a single table with proposed defaults and ask the user to confirm or revise:
