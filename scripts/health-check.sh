@@ -309,14 +309,21 @@ else
     "$PASS" "$WARN" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     printf "${RED}Health check FAILED — fix errors above before proceeding.${NC}\n\n"
+    printf "${RED}🔨💥🥚 Hammer Mei swung — the tamago broke. Fix it!${NC}\n"
+    printf "${RED}       鐵鎚老妹鎚下去，蛋碎了。趕快修！${NC}\n"
+    printf "${RED}       ハンマー妹が叩いた。たまごが割れた。早く直して！${NC}\n\n"
   elif [ "$WARN" -gt 0 ]; then
     printf "${YELLOW}Health check passed with warnings.${NC}"
     [ "$FIX" = false ] && printf " Run with --fix to auto-fix where possible."
     printf "\n\n"
-    printf "${YELLOW}🔨🥚 鐵鎚老妹鎚過，有點壞但還能用。${NC}\n\n"
+    printf "${YELLOW}🔨🥚  Hammer Mei swung — a few cracks, but close enough.${NC}\n"
+    printf "${YELLOW}       鐵鎚老妹鎚過，有點壞但還能用。${NC}\n"
+    printf "${YELLOW}       ハンマー妹が叩いた。少しひびが入ったが、まだ使える。${NC}\n\n"
   else
     printf "${GREEN}All checks passed 🎉${NC}\n\n"
-    printf "${GREEN}🔨🥚 鐵鎚老妹鎚過，沒有壞，認證通過！${NC}\n\n"
+    printf "${GREEN}🔨🥚  Hammer Mei swung — no cracks. This tamago is certified!${NC}\n"
+    printf "${GREEN}       鐵鎚老妹鎚過，沒有壞，認證通過！${NC}\n"
+    printf "${GREEN}       ハンマー妹が叩いた。割れなかった。合格！${NC}\n\n"
   fi
 fi
 
