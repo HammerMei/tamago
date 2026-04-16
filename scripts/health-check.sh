@@ -20,11 +20,20 @@ if [ -z "${PROFILE_REPO:-}" ] && [ -f "$REPO/local.conf" ]; then
 fi
 PROFILE_REPO="${PROFILE_REPO:-$REPO}"
 
+# ─── Agent name (dynamic — read from profile settings) ───────────────────────
+
+AGENT_SETTINGS="$PROFILE_REPO/settings/claude/settings.json"
+if [ -f "$AGENT_SETTINGS" ]; then
+  AGENT_NAME=$(python3 -c "import json; print(json.load(open('$AGENT_SETTINGS')).get('agent',''))" 2>/dev/null || echo "")
+else
+  AGENT_NAME=""
+fi
+
 # ─── Args ─────────────────────────────────────────────────────────────────────
 
 FIX=false
 JSON=false
-PROJECT_DIR="$HOME/workspace/assistant"
+PROJECT_DIR="$(pwd)"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -184,9 +193,13 @@ section "2. Repos & Paths"
   && pass "~/.kpx-keys" "$HOME/.kpx-keys" \
   || warn "~/.kpx-keys" "directory missing — KeePass key files location" "mkdir -p $HOME/.kpx-keys"
 
-[ -d "$PROFILE_REPO/agents/memory/hammer.mei" ] \
-  && pass "memory dir" "hammer.mei/" \
-  || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/hammer.mei"
+if [ -n "$AGENT_NAME" ]; then
+  [ -d "$PROFILE_REPO/agents/memory/$AGENT_NAME" ] \
+    && pass "memory dir" "$AGENT_NAME/" \
+    || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/$AGENT_NAME"
+else
+  warn "memory dir" "no agent name in profile settings — skipping"
+fi
 
 # ─── 3. Global Symlinks ───────────────────────────────────────────────────────
 
@@ -199,14 +212,19 @@ check_symlink "$HOME/.claude/settings.json"  "~/.claude/settings.json"
 section "4. Project Symlinks  ($PROJECT_DIR)"
 
 if [ -d "$PROJECT_DIR" ]; then
-  check_symlink "$PROJECT_DIR/.claude/settings.json"           ".claude/settings.json"
-  check_symlink "$PROJECT_DIR/.claude/agents/hammer.mei.md"    ".claude/agents/hammer.mei.md"
-  check_symlink "$PROJECT_DIR/.claude/agent-memory/hammer.mei" ".claude/agent-memory/hammer.mei"
-  check_symlink "$PROJECT_DIR/.claude/skills/text-to-speech"   ".claude/skills/text-to-speech"
-  check_symlink "$PROJECT_DIR/.claude/skills/daily-briefing"   ".claude/skills/daily-briefing"
-  check_symlink "$PROJECT_DIR/.claude/skills/restart-cli"      ".claude/skills/restart-cli"
-  check_symlink "$PROJECT_DIR/.opencode/opencode.json"         ".opencode/opencode.json"
-  check_symlink "$PROJECT_DIR/.opencode/agents/hammer.mei.md"  ".opencode/agents/hammer.mei.md"
+  check_symlink "$PROJECT_DIR/.claude/settings.json"         ".claude/settings.json"
+  check_symlink "$PROJECT_DIR/.claude/skills/text-to-speech" ".claude/skills/text-to-speech"
+  check_symlink "$PROJECT_DIR/.claude/skills/daily-briefing" ".claude/skills/daily-briefing"
+  check_symlink "$PROJECT_DIR/.claude/skills/restart-cli"    ".claude/skills/restart-cli"
+  check_symlink "$PROJECT_DIR/.opencode/opencode.json"       ".opencode/opencode.json"
+
+  if [ -n "$AGENT_NAME" ]; then
+    check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
+    check_symlink "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
+    check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
+  else
+    warn "agent symlinks" "no agent name in profile — skipping agent-specific symlink checks"
+  fi
 else
   warn "project dir" "not found: $PROJECT_DIR — skipping symlink checks"
 fi
