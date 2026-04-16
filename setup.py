@@ -555,6 +555,81 @@ def setup(
 # Argument parsing & main
 # ---------------------------------------------------------------------------
 
+def _repo_name_from_url(url: str) -> str:
+    """Extract repo name from a git URL, stripping any trailing .git suffix."""
+    name = url.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name
+
+
+def resolve_profile_root(
+    source_root: Path,
+    profile_dir: str | None,
+    profile_repo: str | None,
+    profile_name: str | None,
+) -> Path | None:
+    """Resolve profile_root from one of the three profile specifier options.
+
+    --profile-dir <path>      — use path directly (must already exist)
+    --profile-repo <url>      — clone (or pull) the repo; enforce *-profile naming
+    --profile-name <name>     — shorthand: <source_root>/<name>-profile
+    """
+    if profile_dir:
+        p = Path(profile_dir).expanduser().resolve()
+        if not p.is_dir():
+            raise ValueError(f"Profile directory not found: {p}")
+        return p
+
+    if profile_name:
+        p = source_root / f"{profile_name}-profile"
+        if not p.is_dir():
+            raise ValueError(
+                f"Profile directory not found: {p}\n"
+                f"  Hint: clone your profile repo there first, or use --profile-repo to clone automatically."
+            )
+        return p
+
+    if profile_repo:
+        repo_name = _repo_name_from_url(profile_repo)
+        if not repo_name.endswith("-profile"):
+            raise ValueError(
+                f"Profile repo name must end with '-profile', got: '{repo_name}'\n"
+                f"  Rename your repo to follow the convention (e.g. '{repo_name}-profile'),\n"
+                f"  or use --profile-dir to skip the naming check."
+            )
+        clone_dir = source_root / repo_name
+        if clone_dir.is_dir() and (clone_dir / ".git").exists():
+            print(f"exists  {clone_dir}  (pulling latest)")
+            result = subprocess.run(
+                ["git", "-C", str(clone_dir), "pull", "--rebase"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise ValueError(
+                    f"git pull failed in {clone_dir}:\n{result.stderr.strip()}"
+                )
+        elif clone_dir.exists():
+            raise ValueError(
+                f"Directory exists but is not a git repo: {clone_dir}\n"
+                f"  Remove it first or use --profile-dir to point elsewhere."
+            )
+        else:
+            print(f"cloning {profile_repo}")
+            print(f"     → {clone_dir}")
+            result = subprocess.run(
+                ["git", "clone", profile_repo, str(clone_dir)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise ValueError(
+                    f"git clone failed:\n{result.stderr.strip()}"
+                )
+        return clone_dir
+
+    return None
+
+
 def resolve_source_root(source_override: str | None) -> Path:
     source_root = source_override or os.environ.get("ASSISTANT_SETUP_REPO")
 
@@ -578,11 +653,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     profile_parser = argparse.ArgumentParser(add_help=False)
-    profile_parser.add_argument(
-        "--profile",
-        dest="profile",
+    profile_group = profile_parser.add_mutually_exclusive_group()
+    profile_group.add_argument(
+        "--profile-dir",
+        dest="profile_dir",
         default=None,
-        help="path to profile repo (persona, memory, agent-specific settings)",
+        metavar="PATH",
+        help="path to an already-cloned profile repo",
+    )
+    profile_group.add_argument(
+        "--profile-repo",
+        dest="profile_repo",
+        default=None,
+        metavar="URL",
+        help="git URL of profile repo — clones to <tamago>/<repo-name>/ (name must end with -profile)",
+    )
+    profile_group.add_argument(
+        "--profile-name",
+        dest="profile_name",
+        default=None,
+        metavar="NAME",
+        help="short name, e.g. 'hammer.mei' — resolves to <tamago>/hammer.mei-profile/",
+    )
+    # Deprecated alias kept for backward compatibility
+    profile_group.add_argument(
+        "--profile",
+        dest="profile_dir",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     profile_parser.add_argument(
         "--no-memory-sync",
@@ -648,14 +746,17 @@ def main() -> int:
     if args.command == "uninstall-global":
         return setup_global(Operation.UNINSTALL, source_root)
 
-    # Resolve optional --profile path
-    profile_root: Path | None = None
-    if getattr(args, "profile", None):
-        profile_path = Path(args.profile).expanduser()
-        if not profile_path.is_dir():
-            print(f"Profile directory not found: {profile_path}", file=sys.stderr)
-            return 1
-        profile_root = profile_path
+    # Resolve profile root from whichever flag was given (or None)
+    try:
+        profile_root = resolve_profile_root(
+            source_root,
+            profile_dir=getattr(args, "profile_dir", None),
+            profile_repo=getattr(args, "profile_repo", None),
+            profile_name=getattr(args, "profile_name", None),
+        )
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
 
     for op in Operation:
         if args.command == op.value:

@@ -110,6 +110,72 @@ class ResolveSourceRootTests(unittest.TestCase):
                 setup_module.resolve_source_root(None)
 
 
+class ResolveProfileRootTests(unittest.TestCase):
+    def test_profile_dir_returns_resolved_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            profile = Path(td) / "my.agent-profile"
+            profile.mkdir()
+
+            result = setup_module.resolve_profile_root(source, str(profile), None, None)
+            self.assertEqual(result, profile.resolve())
+
+    def test_profile_dir_missing_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "not found"):
+                setup_module.resolve_profile_root(source, "/does/not/exist", None, None)
+
+    def test_profile_name_resolves_to_sibling(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            profile = source / "hammer.mei-profile"
+            profile.mkdir()
+
+            result = setup_module.resolve_profile_root(source, None, None, "hammer.mei")
+            self.assertEqual(result, profile)
+
+    def test_profile_name_missing_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "not found"):
+                setup_module.resolve_profile_root(source, None, None, "nobody")
+
+    def test_profile_repo_rejects_non_profile_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "must end with '-profile'"):
+                setup_module.resolve_profile_root(
+                    source, None, "https://github.com/user/my-agent.git", None
+                )
+
+    def test_repo_name_from_url_strips_git_suffix(self):
+        cases = [
+            ("https://github.com/user/hammer.mei-profile.git", "hammer.mei-profile"),
+            ("https://github.com/user/hammer.mei-profile",     "hammer.mei-profile"),
+            ("git@github.com:user/xiao.mei-profile.git",       "xiao.mei-profile"),
+            ("ssh://git@host/path/my-profile.git",             "my-profile"),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(setup_module._repo_name_from_url(url), expected)
+
+    def test_none_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            result = setup_module.resolve_profile_root(source, None, None, None)
+            self.assertIsNone(result)
+
+
 class SetupGitignoreTests(unittest.TestCase):
     def test_install_adds_missing_entries_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
