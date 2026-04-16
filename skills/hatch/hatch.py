@@ -8,14 +8,14 @@ Creates a profile directory with:
   - settings/opencode/opencode.json
   - .gitignore
 
-Then optionally runs `setup.py install --profile <profile_dir>`.
+Then optionally runs `setup.py install --profile-dir <profile_dir>`.
 
 Usage:
     python3 .claude/skills/hatch/hatch.py \\
         --name xiao.mei \\
         --display-name 小小妹 \\
         --description "Junior helper agent for research and task delegation" \\
-        --profile-dir ~/workspace/xiao.mei-profile \\
+        --profile-dir ~/.tamago/xiao.mei-profile \\
         [--language "Traditional Chinese"] \\
         [--tone "Friendly, energetic, helpful"] \\
         [--user-address "老哥"] \\
@@ -348,10 +348,10 @@ def main() -> int:
 
     if args.install:
         setup_py = tamago_root / "setup.py"
-        install_cmd = [sys.executable, str(setup_py), "install", "--profile", str(profile_dir)]
+        install_cmd = [sys.executable, str(setup_py), "install", "--profile-dir", str(profile_dir)]
         if getattr(args, "no_memory_sync", False):
             install_cmd.append("--no-memory-sync")
-        print(f"\n▶ Running: python3 setup.py install --profile {profile_dir}"
+        print(f"\n▶ Running: python3 setup.py install --profile-dir {profile_dir}"
               + (" --no-memory-sync" if getattr(args, "no_memory_sync", False) else ""))
         result = subprocess.run(install_cmd, check=False)
         if result.returncode != 0:
@@ -364,7 +364,7 @@ def main() -> int:
     else:
         print("\nNext steps:")
         print(f"  1. cd <your-project-dir>")
-        print(f"  2. python3 {tamago_root}/setup.py install --profile {profile_dir}")
+        print(f"  2. python3 {tamago_root}/setup.py install --profile-dir {profile_dir}")
         print(f"  3. Restart Claude to activate the '{args.name}' agent")
 
     if args.remote:

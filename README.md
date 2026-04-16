@@ -57,12 +57,13 @@ git clone https://github.com/HammerMei/tamago ~/.tamago
 python3 ~/.tamago/setup.py install-global
 
 # 3. Clone (or create) your profile repo
-git clone <your-profile-remote> ~/workspace/your-profile
+git clone <your-profile-remote> ~/.tamago/your-profile
 # — OR — hatch a brand-new one (see below)
 
 # 4. Install into a project
 cd ~/workspace/your-project
-python3 ~/.tamago/setup.py install --profile ~/workspace/your-profile
+python3 ~/.tamago/setup.py install --profile-dir ~/.tamago/your-profile
+# Shorthand: --profile-name your  (resolves to ~/.tamago/your-profile)
 
 # 5. Run the health check to verify everything is wired up
 bash ~/.tamago/scripts/health-check.sh
@@ -95,10 +96,10 @@ python3 .claude/skills/hatch/hatch.py \
   --language "Traditional Chinese" \
   --tone "Energetic, helpful, slightly junior" \
   --user-address "老哥" \
-  --profile-dir ~/workspace/xiao.mei-profile \
+  --profile-dir ~/.tamago/xiao.mei-profile \
   --tts --tts-voice "Meijia" \
   --skills "text-to-speech" \
-  --install     # runs setup.py install --profile automatically
+  --install     # runs setup.py install --profile-dir automatically
 ```
 
 After hatching, **restart Claude** to activate the new agent.
@@ -228,7 +229,7 @@ After editing `<name>.persona.md` or pulling tamago updates:
 
 ```bash
 cd ~/workspace/your-project
-python3 ~/.tamago/setup.py install --profile ~/workspace/your-profile
+python3 ~/.tamago/setup.py install --profile-name your
 ```
 
 The `git-hooks/post-merge` hook (installed by `install-global`) does this automatically

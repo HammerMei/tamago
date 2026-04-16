@@ -44,7 +44,7 @@ Then present a single table with proposed defaults and ask the user to confirm o
 | `--language` | `Traditional Chinese` |
 | `--tone` | `Friendly and helpful` |
 | `--user-address` | `老哥` |
-| `--profile-dir` | `~/workspace/<name>-profile` |
+| `--profile-dir` | `~/.tamago/<name>-profile` |
 | `--remote` | (none — skip for local-only) |
 | TTS enabled | no |
 | `--tts-voice` | `Meijia` (zh-TW) / `Samantha` (en-US), only if TTS enabled |
@@ -70,7 +70,7 @@ If they choose a **new project dir**: run hatch **without** `--install`, then ou
 mkdir -p <project-dir>
 cd <project-dir>
 python3 ~/.tamago/setup.py install-global   # if not done yet
-python3 ~/.tamago/setup.py install --profile <profile-dir>
+python3 ~/.tamago/setup.py install --profile-dir <profile-dir>
 ```
 
 If they choose the **current project**: proceed with `--install`:
@@ -105,7 +105,7 @@ false failures in the health check. The user can enable sync later by removing
 3. Let them know the persona lives at:
    `<profile-dir>/agents/<name>.persona.md`
    and can be regenerated after edits with:
-   `python3 ~/.tamago/setup.py install --profile <profile-dir>`
+   `python3 ~/.tamago/setup.py install --profile-dir <profile-dir>`
 
 ## Error handling
 
