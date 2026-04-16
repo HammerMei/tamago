@@ -3,11 +3,6 @@
 This section is automatically merged into agent system prompts by tamago's `setup.py`.
 It covers tamago mechanics common to all agents: memory system, sync behavior, and tooling.
 
-> Template variables resolved at merge time:
-> - `{{AGENT_NAME}}` — agent identifier (e.g. `hammer.mei`)
-> - `{{PROFILE_REPO}}` — absolute path to the profile repo
-> - `{{AGENT_MEMORY_PATH}}` — `{{PROFILE_REPO}}/agents/memory/{{AGENT_NAME}}`
-
 
 # Deployment Health Check
 
@@ -25,23 +20,21 @@ Specify `--project <dir>` to check a different project directory.
 
 ## Memory Structure
 
-Memory is stored in two layers:
+Memory is stored in two layers accessible via project-scope symlinks under `.claude/agent-memory/`.
 
-> ⚠️ **Important: all memory files must be written under the profile repo path**
-> (`{{AGENT_MEMORY_PATH}}/`).
-> Never write to `~/.claude/` or any home-level `.claude/` — those paths are not git-tracked
-> and cannot sync across machines.
-> `{{PROFILE_REPO}}` is resolved from `tamago/local.conf` or the `PROFILE_REPO` env var.
+> ⚠️ **Always use the symlink path** `.claude/agent-memory/{{AGENT_NAME}}/` for all Read/Write
+> tool calls — it lives inside the project directory and never requires permission approval.
+> Never write to `~/.claude/` or any absolute profile path — those are outside the project
+> scope and will trigger approval prompts.
 
 ### 🌐 Shared Memory (synced across all instances)
-Real path: `{{AGENT_MEMORY_PATH}}/`
-(also accessible via symlink `.claude/agent-memory/{{AGENT_NAME}}/`)
+Path: `.claude/agent-memory/{{AGENT_NAME}}/`
 - `MEMORY.md` — memory index; auto-loaded at session start when available. **If not present in context, load it explicitly with the Read tool before proceeding.**
 - Topic files (e.g. `user.md`, `feedback.md`) — load on demand when relevant
 - All content synced via git to every instance of this agent
 
 ### 🖥️ Environment-Specific Memory (local to this machine)
-Real path: `{{AGENT_MEMORY_PATH}}/env-{hostname}/`
+Path: `.claude/agent-memory/{{AGENT_NAME}}/env-{hostname}/`
 - Per-machine private memory (hardware, installed tools, local config)
 - Also git-synced, but only read by the matching hostname instance
 - Use `hostname` command to get the current machine name
@@ -66,9 +59,7 @@ Memory syncs automatically via git hooks (configured in `settings/claude/setting
 - Push failures surface as a `systemMessage` warning
 - Pull failures are injected into Claude context as a note
 
-`LAOMEI_MEMORY_SYNC` env var:
-- Default `1` (enabled)
-- Set to `0` to disable all sync (offline / emergency use)
+`MEMORY_SYNC=0` in `tamago/local.conf` (or env var `LAOMEI_MEMORY_SYNC=0`) disables all sync.
 
 ## Memory Types
 
@@ -91,7 +82,7 @@ After writing a topic file, add a one-line pointer to `MEMORY.md`:
 `- [Title](file.md) — one-line hook (under ~150 chars)`
 
 **Do NOT save to memory**: code patterns, git history, debugging solutions, anything
-already in CLAUDE.md, or ephemeral task details.
+already in CLAUDE.md files, or ephemeral task details.
 
 ## Before Acting on a Memory
 
