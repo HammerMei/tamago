@@ -20,6 +20,13 @@ if [ -z "${PROFILE_REPO:-}" ] && [ -f "$REPO/local.conf" ]; then
 fi
 PROFILE_REPO="${PROFILE_REPO:-$REPO}"
 
+# Whether a separate profile repo is configured
+if [ "$PROFILE_REPO" != "$REPO" ]; then
+  HAS_PROFILE=true
+else
+  HAS_PROFILE=false
+fi
+
 # ─── Agent name (dynamic — read from profile settings) ───────────────────────
 
 AGENT_SETTINGS="$PROFILE_REPO/settings/claude/settings.json"
@@ -185,15 +192,21 @@ section "2. Repos & Paths"
   && pass "profile repo" "$PROFILE_REPO" \
   || fail "profile repo" "not found: $PROFILE_REPO"
 
-[ -f "$REPO/local.conf" ] \
-  && pass "local.conf" "PROFILE_REPO=$(grep '^PROFILE_REPO=' "$REPO/local.conf" | cut -d= -f2-)" \
-  || warn "local.conf" "missing — PROFILE_REPO may not resolve correctly"
+if [ "$HAS_PROFILE" = true ]; then
+  [ -f "$REPO/local.conf" ] \
+    && pass "local.conf" "PROFILE_REPO=$(grep '^PROFILE_REPO=' "$REPO/local.conf" | cut -d= -f2-)" \
+    || warn "local.conf" "missing — PROFILE_REPO may not resolve correctly"
+else
+  pass "local.conf" "no profile configured — skipping"
+fi
 
 [ -d "$HOME/.kpx-keys" ] \
   && pass "~/.kpx-keys" "$HOME/.kpx-keys" \
   || warn "~/.kpx-keys" "directory missing — KeePass key files location" "mkdir -p $HOME/.kpx-keys"
 
-if [ -n "$AGENT_NAME" ]; then
+if [ "$HAS_PROFILE" = false ]; then
+  pass "memory dir" "no profile configured — skipping"
+elif [ -n "$AGENT_NAME" ]; then
   [ -d "$PROFILE_REPO/agents/memory/$AGENT_NAME" ] \
     && pass "memory dir" "$AGENT_NAME/" \
     || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/$AGENT_NAME"
@@ -218,12 +231,14 @@ if [ -d "$PROJECT_DIR" ]; then
   check_symlink "$PROJECT_DIR/.claude/skills/restart-cli"    ".claude/skills/restart-cli"
   check_symlink "$PROJECT_DIR/.opencode/opencode.json"       ".opencode/opencode.json"
 
-  if [ -n "$AGENT_NAME" ]; then
+  if [ "$HAS_PROFILE" = false ]; then
+    pass "agent symlinks" "no profile configured — skipping"
+  elif [ -n "$AGENT_NAME" ]; then
     check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
     check_symlink "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
     check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
   else
-    warn "agent symlinks" "no agent name in profile — skipping agent-specific symlink checks"
+    warn "agent symlinks" "no agent name in profile settings — skipping"
   fi
 else
   warn "project dir" "not found: $PROJECT_DIR — skipping symlink checks"
@@ -242,7 +257,7 @@ if [ -d "$REPO/.git" ]; then
   fi
 fi
 
-if [ -d "$PROFILE_REPO/.git" ]; then
+if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/.git" ]; then
   remote=$(cd "$PROFILE_REPO" && git remote get-url origin 2>/dev/null || echo "no remote")
   if (cd "$PROFILE_REPO" && run_timed git ls-remote --exit-code origin HEAD &>/dev/null); then
     pass "profile remote" "$remote"
@@ -255,12 +270,16 @@ fi
 
 section "6. Memory Sync"
 
-SYNC_OUT=$("$REPO/scripts/memory-sync.sh" --pull 2>&1)
-SYNC_EXIT=$?
-if [ $SYNC_EXIT -ne 0 ] || echo "$SYNC_OUT" | grep -qi "warning\|failed\|error"; then
-  fail "memory-sync --pull" "${SYNC_OUT:-exit $SYNC_EXIT}"
+if [ "$HAS_PROFILE" = true ]; then
+  SYNC_OUT=$("$REPO/scripts/memory-sync.sh" --pull 2>&1)
+  SYNC_EXIT=$?
+  if [ $SYNC_EXIT -ne 0 ] || echo "$SYNC_OUT" | grep -qi "warning\|failed\|error"; then
+    fail "memory-sync --pull" "${SYNC_OUT:-exit $SYNC_EXIT}"
+  else
+    pass "memory-sync --pull" "ok"
+  fi
 else
-  pass "memory-sync --pull" "ok"
+  pass "memory-sync --pull" "no profile configured — skipping"
 fi
 
 # ─── 7. Profile Extra Checks (optional) ──────────────────────────────────────
