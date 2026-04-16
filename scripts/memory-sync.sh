@@ -18,8 +18,16 @@
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 MEMORY_PATH="agents/memory"
 
-# Resolve PROFILE_REPO and MEMORY_SYNC: env var → local.conf → fallback
-if [ -f "$REPO/local.conf" ]; then
+# Resolve PROFILE_REPO and MEMORY_SYNC.
+# Priority: env var → project-scoped .tamago/tamago.conf → global local.conf → fallback
+# Hooks run with CWD = project dir, so $PWD/.tamago/tamago.conf is project-specific.
+PROJECT_CONF="$PWD/.tamago/tamago.conf"
+if [ -f "$PROJECT_CONF" ]; then
+  [ -z "$PROFILE_REPO" ] && \
+    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+  [ -z "$MEMORY_SYNC" ] && \
+    MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+elif [ -f "$REPO/local.conf" ]; then
   [ -z "$PROFILE_REPO" ] && \
     PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
   [ -z "$MEMORY_SYNC" ] && \

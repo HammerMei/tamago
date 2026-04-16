@@ -41,7 +41,7 @@ DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent
 # ASSISTANT_SETUP_REPO is not set.  We skip env injection only when tamago
 # is actually installed here (the fallback already covers it).
 CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
-GITIGNORE_ENTRIES = (".claude", ".opencode")
+GITIGNORE_ENTRIES = (".claude", ".opencode", ".tamago")
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +141,26 @@ def setup_gitignore(operation: Operation, project_root: Path):
 
 
 # ---------------------------------------------------------------------------
-# local.conf — stores PROFILE_REPO for memory-sync.sh
+# Project config — stores PROFILE_REPO per project
 # ---------------------------------------------------------------------------
+#
+# Config is stored in <project_dir>/.tamago/tamago.conf (project-scoped) so
+# multiple projects can each use a different profile without overwriting each
+# other.  tamago's global local.conf is also written as a convenience cache
+# for memory-sync.sh (which may not have easy access to the project dir).
+
+PROJECT_CONF_NAME = "tamago.conf"  # lives inside <project_dir>/.tamago/
+
+
+def _write_conf_file(path: Path, lines: list[str]) -> None:
+    content = "\n".join(lines) + "\n"
+    if path.exists() and path.read_text() == content:
+        print(f"exists  {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    print(f"updated {path}")
+
 
 def write_local_conf(
     source_root: Path,
@@ -150,9 +168,22 @@ def write_local_conf(
     project_root: Path | None = None,
     memory_sync: bool = True,
 ):
-    """Write (or remove) PROFILE_REPO=, PROJECT_DIR=, MEMORY_SYNC= in <source_root>/local.conf."""
-    local_conf = source_root / "local.conf"
+    """Write (or remove) project-scoped tamago.conf and tamago's global local.conf."""
+    # ── Project-scoped config (.tamago/tamago.conf) ──────────────────────────
+    if project_root is not None:
+        project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+        if profile_root is None:
+            if project_conf.exists():
+                project_conf.unlink()
+                print(f"removed {project_conf}")
+        else:
+            lines = [f"PROFILE_REPO={profile_root.resolve()}"]
+            if not memory_sync:
+                lines.append("MEMORY_SYNC=0")
+            _write_conf_file(project_conf, lines)
 
+    # ── Global cache (tamago/local.conf) — used by memory-sync.sh ────────────
+    local_conf = source_root / "local.conf"
     if profile_root is None:
         if local_conf.exists():
             local_conf.unlink()
@@ -164,14 +195,7 @@ def write_local_conf(
         lines.append(f"PROJECT_DIR={project_root.resolve()}")
     if not memory_sync:
         lines.append("MEMORY_SYNC=0")
-    content = "\n".join(lines) + "\n"
-
-    if local_conf.exists() and local_conf.read_text() == content:
-        print(f"exists  {local_conf}")
-        return
-
-    local_conf.write_text(content)
-    print(f"updated {local_conf}")
+    _write_conf_file(local_conf, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -752,17 +776,18 @@ def main() -> int:
         print(e, file=sys.stderr)
         return 1
 
-    # Uninstall fallback: if no profile flag given, read PROFILE_REPO from local.conf
-    # so the user doesn't need to remember which profile was installed here.
+    # Uninstall fallback: if no profile flag given, read PROFILE_REPO from the
+    # project-scoped .tamago/tamago.conf — correct even with multiple projects.
     if profile_root is None and args.command == Operation.UNINSTALL.value:
-        local_conf = source_root / "local.conf"
-        if local_conf.exists():
-            for line in local_conf.read_text().splitlines():
+        project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+        fallback_conf = project_conf if project_conf.exists() else source_root / "local.conf"
+        if fallback_conf.exists():
+            for line in fallback_conf.read_text().splitlines():
                 if line.startswith("PROFILE_REPO="):
                     candidate = Path(line.split("=", 1)[1].strip())
                     if candidate.is_dir():
                         profile_root = candidate
-                        print(f"info    using PROFILE_REPO from local.conf: {profile_root}")
+                        print(f"info    using PROFILE_REPO from {fallback_conf.name}: {profile_root}")
                     break
 
     for op in Operation:

@@ -187,18 +187,18 @@ class SetupGitignoreTests(unittest.TestCase):
 
             self.assertEqual(
                 gitignore.read_text(),
-                "node_modules\n.claude\n.opencode\n",
+                "node_modules\n.claude\n.opencode\n.tamago\n",
             )
 
     def test_install_does_not_duplicate_entries_with_trailing_slash(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text(".claude/\n.opencode/\n")
+            gitignore.write_text(".claude/\n.opencode/\n.tamago/\n")
 
             setup_module.setup_gitignore(setup_module.Operation.INSTALL, project_root)
 
-            self.assertEqual(gitignore.read_text(), ".claude/\n.opencode/\n")
+            self.assertEqual(gitignore.read_text(), ".claude/\n.opencode/\n.tamago/\n")
 
     def test_install_creates_gitignore_when_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -208,14 +208,14 @@ class SetupGitignoreTests(unittest.TestCase):
 
             self.assertEqual(
                 (project_root / ".gitignore").read_text(),
-                ".claude\n.opencode\n",
+                ".claude\n.opencode\n.tamago\n",
             )
 
     def test_uninstall_removes_managed_entries_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text("node_modules\n.claude\n.opencode\ndist\n")
+            gitignore.write_text("node_modules\n.claude\n.opencode\n.tamago\ndist\n")
 
             setup_module.setup_gitignore(setup_module.Operation.UNINSTALL, project_root)
 
@@ -225,7 +225,7 @@ class SetupGitignoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text(".claude/\n.opencode/\n")
+            gitignore.write_text(".claude/\n.opencode/\n.tamago/\n")
 
             setup_module.setup_gitignore(setup_module.Operation.UNINSTALL, project_root)
 

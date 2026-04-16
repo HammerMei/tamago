@@ -15,7 +15,37 @@
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 
-if [ -f "$REPO/local.conf" ]; then
+# ─── Args (parsed first so PROJECT_DIR is known for config resolution) ────────
+
+FIX=false
+JSON=false
+PROJECT_DIR="$(pwd)"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --fix)     FIX=true ;;
+    --json)    JSON=true ;;
+    --project) PROJECT_DIR="$2"; shift ;;
+    -h|--help)
+      echo "Usage: $0 [--fix] [--json] [--project <dir>]"
+      echo "  --fix            Auto-fix simple issues (brew install, mkdir)"
+      echo "  --json           Machine-readable JSON output"
+      echo "  --project <dir>  Project dir to check (default: cwd)"
+      exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+# ─── Profile resolution (project-scoped conf takes priority) ──────────────────
+# Priority: env var → <project>/.tamago/tamago.conf → global local.conf
+
+PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
+if [ -f "$PROJECT_CONF" ]; then
+  [ -z "${PROFILE_REPO:-}" ] && \
+    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+  MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+elif [ -f "$REPO/local.conf" ]; then
   [ -z "${PROFILE_REPO:-}" ] && \
     PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
   MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
@@ -37,28 +67,6 @@ if [ -f "$AGENT_SETTINGS" ]; then
 else
   AGENT_NAME=""
 fi
-
-# ─── Args ─────────────────────────────────────────────────────────────────────
-
-FIX=false
-JSON=false
-PROJECT_DIR="$(pwd)"
-
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --fix)     FIX=true ;;
-    --json)    JSON=true ;;
-    --project) PROJECT_DIR="$2"; shift ;;
-    -h|--help)
-      echo "Usage: $0 [--fix] [--json] [--project <dir>]"
-      echo "  --fix            Auto-fix simple issues (brew install, mkdir)"
-      echo "  --json           Machine-readable JSON output"
-      echo "  --project <dir>  Project dir to check (default: ~/workspace/assistant)"
-      exit 0 ;;
-    *) echo "Unknown option: $1" >&2; exit 1 ;;
-  esac
-  shift
-done
 
 # ─── Colors (only when printing to terminal, not in JSON mode) ────────────────
 
