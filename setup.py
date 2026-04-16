@@ -557,6 +557,22 @@ def setup(
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
+        # For INSTALL: if a different profile was previously installed, clean it up first
+        # so stale agent .md files and memory symlinks from the old profile are removed.
+        if operation == Operation.INSTALL and profile_root is not None:
+            project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+            if project_conf.exists():
+                for line in project_conf.read_text().splitlines():
+                    if line.startswith("PROFILE_REPO="):
+                        old_profile = Path(line.split("=", 1)[1].strip())
+                        if old_profile.is_dir() and old_profile.resolve() != profile_root.resolve():
+                            print(
+                                f"info    replacing profile: {old_profile.name} → {profile_root.name}"
+                            )
+                            setup_agents(Operation.UNINSTALL, source_root, project_root, old_profile)
+                            setup_skills(Operation.UNINSTALL, source_root, project_root, old_profile)
+                        break
+
         setup_gitignore(operation, project_root)
         setup_skills(operation, source_root, project_root, profile_root)
         setup_agents(operation, source_root, project_root, profile_root)

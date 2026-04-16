@@ -320,6 +320,139 @@ class SetupHealthCheckIntegrationTests(unittest.TestCase):
             hc_mock.assert_not_called()
 
 
+class ProfileReplaceTests(unittest.TestCase):
+    """When install is run twice with different profiles, stale artifacts from
+    the first profile must be cleaned up automatically before installing the new one."""
+
+    def _make_minimal_source(self, temp_dir: str) -> tuple[Path, Path]:
+        """Create a minimal tamago source and project root for setup() calls."""
+        source_root = Path(temp_dir) / "tamago"
+        project_root = Path(temp_dir) / "project"
+        project_root.mkdir(parents=True)
+
+        for subdir in [
+            "skills", "agents", "settings/claude", "settings/opencode",
+            "settings/opencode/plugins",
+        ]:
+            (source_root / subdir).mkdir(parents=True)
+        (source_root / "settings" / "claude" / "settings.json").write_text("{}")
+        (source_root / "settings" / "opencode" / "opencode.json").write_text("{}")
+        return source_root, project_root
+
+    def _make_profile(self, temp_dir: str, name: str) -> Path:
+        """Create a minimal profile with one persona agent and a memory dir."""
+        profile = Path(temp_dir) / f"{name}-profile"
+        (profile / "agents").mkdir(parents=True)
+        (profile / "agents" / f"{name}.persona.md").write_text(
+            f"---\nagent: {name}\n---\nHello from {name}"
+        )
+        (profile / "agents" / "memory" / name).mkdir(parents=True)
+        (profile / "settings" / "claude").mkdir(parents=True)
+        (profile / "settings" / "claude" / "settings.json").write_text(
+            f'{{"agent": "{name}"}}'
+        )
+        (profile / "settings" / "opencode").mkdir(parents=True)
+        (profile / "settings" / "opencode" / "opencode.json").write_text("{}")
+        return profile
+
+    def test_reinstall_with_different_profile_removes_old_agent_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root, project_root = self._make_minimal_source(temp_dir)
+
+            # We need a minimal tamago-agent-base.md so _merge_agent works
+            docs_dir = source_root / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "tamago-agent-base.md").write_text("base {{AGENT_NAME}}")
+
+            profile_a = self._make_profile(temp_dir, "hammer.mei")
+            profile_b = self._make_profile(temp_dir, "little.mei")
+
+            with mock.patch.object(setup_module, "run_health_check"):
+                setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, profile_a
+                )
+
+            # After first install: hammer.mei agent file and memory symlink exist
+            claude_agents = project_root / ".claude" / "agents"
+            claude_mem = project_root / ".claude" / "agent-memory"
+            self.assertTrue((claude_agents / "hammer.mei.md").exists())
+            self.assertTrue((claude_mem / "hammer.mei").is_symlink())
+
+            with mock.patch.object(setup_module, "run_health_check"):
+                setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, profile_b
+                )
+
+            # After second install: hammer.mei artifacts should be gone
+            self.assertFalse((claude_agents / "hammer.mei.md").exists(),
+                             "old agent .md from hammer.mei should have been removed")
+            self.assertFalse((claude_mem / "hammer.mei").is_symlink(),
+                             "old memory symlink for hammer.mei should have been removed")
+
+            # New profile's artifacts should be present
+            self.assertTrue((claude_agents / "little.mei.md").exists())
+            self.assertTrue((claude_mem / "little.mei").is_symlink())
+
+    def test_reinstall_with_same_profile_does_not_double_remove(self):
+        """Installing the same profile twice should be idempotent — no removal."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root, project_root = self._make_minimal_source(temp_dir)
+
+            docs_dir = source_root / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "tamago-agent-base.md").write_text("base {{AGENT_NAME}}")
+
+            profile_a = self._make_profile(temp_dir, "hammer.mei")
+
+            with mock.patch.object(setup_module, "run_health_check"):
+                setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, profile_a
+                )
+            with mock.patch.object(setup_module, "run_health_check"):
+                result = setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, profile_a
+                )
+
+            self.assertEqual(result, 0)
+            # File should still be present (idempotent install)
+            self.assertTrue(
+                (project_root / ".claude" / "agents" / "hammer.mei.md").exists()
+            )
+
+    def test_reinstall_without_profile_does_not_touch_existing_artifacts(self):
+        """If no profile is given on second install, skip the cleanup step entirely."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root, project_root = self._make_minimal_source(temp_dir)
+
+            docs_dir = source_root / "docs"
+            docs_dir.mkdir()
+            (docs_dir / "tamago-agent-base.md").write_text("base {{AGENT_NAME}}")
+
+            profile_a = self._make_profile(temp_dir, "hammer.mei")
+
+            with mock.patch.object(setup_module, "run_health_check"):
+                setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, profile_a
+                )
+
+            # Second install with no profile (profile_root=None) — cleanup must NOT run
+            with (
+                mock.patch.object(setup_module, "run_health_check"),
+                mock.patch.object(setup_module, "setup_agents") as agents_mock,
+            ):
+                setup_module.setup(
+                    setup_module.Operation.INSTALL, source_root, project_root, None
+                )
+
+            # setup_agents should have been called once for INSTALL, not for UNINSTALL
+            calls = agents_mock.call_args_list
+            for call in calls:
+                self.assertNotEqual(
+                    call.args[0], setup_module.Operation.UNINSTALL,
+                    "setup_agents(UNINSTALL) must not be called when profile_root is None"
+                )
+
+
 class MainTests(unittest.TestCase):
     def test_main_passes_cli_source_to_setup(self):
         with (
