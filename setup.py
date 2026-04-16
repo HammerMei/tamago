@@ -33,7 +33,7 @@ class Operation(str, Enum):
     UNINSTALL = "uninstall"
 
 
-DEFAULT_SOURCE_ROOT = Path("~/workspace/tamago").expanduser()
+DEFAULT_SOURCE_ROOT = Path("~/.tamago").expanduser()
 GITIGNORE_ENTRIES = (".claude", ".opencode")
 
 
@@ -367,20 +367,50 @@ def setup_agents(
 # Skills
 # ---------------------------------------------------------------------------
 
-def setup_skills(operation: Operation, source_root: Path, project_root: Path):
-    source_skills_root = source_root / "skills"
+def setup_skills(
+    operation: Operation,
+    source_root: Path,
+    project_root: Path,
+    profile_root: Path | None = None,
+):
+    """Symlink skills into project_root.
+
+    Skills come from two sources (profile skills take precedence over tamago skills):
+      1. tamago/skills/  — built-in skills bundled with tamago
+      2. profile/skills/ — custom skills defined in the profile repo (optional)
+
+    When both sources contain a skill with the same name, the profile version wins.
+    """
     target_claude_skills_root = project_root / ".claude" / "skills"
     target_opencode_skills_root = project_root / ".opencode" / "skills"
-    skill_dirs = sub_paths(
-        source_skills_root, lambda p: p.is_dir() and not p.name.startswith(".")
+
+    # Collect tamago built-in skills
+    tamago_skills_root = source_root / "skills"
+    tamago_skill_dirs = sub_paths(
+        tamago_skills_root, lambda p: p.is_dir() and not p.name.startswith(".")
     )
 
+    # Collect profile-specific skills (may override tamago skills of the same name)
+    profile_skill_dirs: list[Path] = []
+    if profile_root:
+        profile_skills_root = profile_root / "skills"
+        if profile_skills_root.is_dir():
+            profile_skill_dirs = sub_paths(
+                profile_skills_root, lambda p: p.is_dir() and not p.name.startswith(".")
+            )
+
+    # Build merged list: profile skills shadow tamago skills of the same name
+    profile_skill_names = {p.name for p in profile_skill_dirs}
+    merged_skill_dirs = [
+        d for d in tamago_skill_dirs if d.name not in profile_skill_names
+    ] + profile_skill_dirs
+
     if operation == Operation.INSTALL:
-        symlink_paths(skill_dirs, target_claude_skills_root)
-        symlink_paths(skill_dirs, target_opencode_skills_root)
+        symlink_paths(merged_skill_dirs, target_claude_skills_root)
+        symlink_paths(merged_skill_dirs, target_opencode_skills_root)
     elif operation == Operation.UNINSTALL:
-        unlink_paths(skill_dirs, target_claude_skills_root)
-        unlink_paths(skill_dirs, target_opencode_skills_root)
+        unlink_paths(merged_skill_dirs, target_claude_skills_root)
+        unlink_paths(merged_skill_dirs, target_opencode_skills_root)
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +527,7 @@ def setup(
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root)
+        setup_skills(operation, source_root, project_root, profile_root)
         setup_agents(operation, source_root, project_root, profile_root)
         setup_settings(operation, source_root, project_root, profile_root)
 

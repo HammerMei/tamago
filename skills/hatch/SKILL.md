@@ -31,7 +31,7 @@ then materialize the files via `hatch.py`.
 List available tamago skills first:
 
 ```bash
-ls ~/workspace/tamago/skills/
+ls ~/.tamago/skills/
 ```
 
 Then present a single table with proposed defaults and ask the user to confirm or revise:
@@ -69,8 +69,8 @@ If they choose a **new project dir**: run hatch **without** `--install`, then ou
 ```bash
 mkdir -p <project-dir>
 cd <project-dir>
-python3 ~/workspace/tamago/setup.py install-global   # if not done yet
-python3 ~/workspace/tamago/setup.py install --profile <profile-dir>
+python3 ~/.tamago/setup.py install-global   # if not done yet
+python3 ~/.tamago/setup.py install --profile <profile-dir>
 ```
 
 If they choose the **current project**: proceed with `--install`:
@@ -105,7 +105,7 @@ false failures in the health check. The user can enable sync later by removing
 3. Let them know the persona lives at:
    `<profile-dir>/agents/<name>.persona.md`
    and can be regenerated after edits with:
-   `python3 ~/workspace/tamago/setup.py install --profile <profile-dir>`
+   `python3 ~/.tamago/setup.py install --profile <profile-dir>`
 
 ## Error handling
 

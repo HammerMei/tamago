@@ -21,8 +21,8 @@ Usage:
         [--user-address "老哥"] \\
         [--remote ssh://user@host/path.git] \\
         [--tts --tts-voice Meijia] \\
-        [--skills text-to-speech,daily-briefing] \\
-        [--source ~/workspace/tamago] \\
+        [--skills text-to-speech] \\
+        [--source ~/.tamago] \\
         [--install] \\
         [--dry-run]
 """
@@ -40,7 +40,7 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_TAMAGO_ROOT = Path("~/workspace/tamago").expanduser()
+DEFAULT_TAMAGO_ROOT = Path("~/.tamago").expanduser()
 TEMPLATES_DIR = "templates"
 
 
@@ -277,7 +277,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--skills", default="",
-        help="Comma-separated tamago skill names to include, e.g. text-to-speech,daily-briefing",
+        help="Comma-separated tamago skill names to include, e.g. text-to-speech",
     )
     p.add_argument(
         "--source", default=None,

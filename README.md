@@ -17,7 +17,7 @@ It provides the mechanics — **you bring the soul**.
 
 | Path | Purpose |
 |------|---------|
-| `skills/` | Packaged skills (TTS, daily briefing, restart-cli, **hatch**) |
+| `skills/` | Packaged skills (TTS, **hatch**; add your own in your profile repo) |
 | `templates/` | Profile scaffolding templates used by the hatch skill |
 | `scripts/memory-sync.sh` | Git-backed memory sync across machines |
 | `scripts/health-check.sh` | Post-setup environment health check |
@@ -51,10 +51,10 @@ The profile repo can live anywhere: GitHub, a private bare repo on your home ser
 
 ```bash
 # 1. Clone tamago
-git clone https://github.com/HammerMei/tamago ~/workspace/tamago
+git clone https://github.com/HammerMei/tamago ~/.tamago
 
 # 2. Install global hooks + settings
-python3 ~/workspace/tamago/setup.py install-global
+python3 ~/.tamago/setup.py install-global
 
 # 3. Clone (or create) your profile repo
 git clone <your-profile-remote> ~/workspace/your-profile
@@ -62,10 +62,10 @@ git clone <your-profile-remote> ~/workspace/your-profile
 
 # 4. Install into a project
 cd ~/workspace/your-project
-python3 ~/workspace/tamago/setup.py install --profile ~/workspace/your-profile
+python3 ~/.tamago/setup.py install --profile ~/workspace/your-profile
 
 # 5. Run the health check to verify everything is wired up
-bash ~/workspace/tamago/scripts/health-check.sh
+bash ~/.tamago/scripts/health-check.sh
 ```
 
 
@@ -97,7 +97,7 @@ python3 .claude/skills/hatch/hatch.py \
   --user-address "老哥" \
   --profile-dir ~/workspace/xiao.mei-profile \
   --tts --tts-voice "Meijia" \
-  --skills "text-to-speech,daily-briefing" \
+  --skills "text-to-speech" \
   --install     # runs setup.py install --profile automatically
 ```
 
@@ -145,6 +145,9 @@ your-profile/
       settings.json            ← {"agent": "<name>"}
     opencode/
       opencode.json            ← {"default_agent": "<name>"}
+  skills/                      ← (optional) custom skills; shadow tamago built-ins by name
+    my-skill/
+      SKILL.md
   secrets/                     ← (gitignored) KeePass databases, keys
 ```
 
@@ -159,7 +162,6 @@ description: >
   What this agent does, in one line.
 skills:
   - text-to-speech
-  - daily-briefing
 memory: project
 maxTurns: 12
 ---
@@ -188,12 +190,34 @@ Set `LAOMEI_MEMORY_SYNC=0` to disable sync (offline / emergency use).
 
 ## Available skills
 
+### Built-in (tamago)
+
 | Skill | Description |
 |-------|-------------|
 | `text-to-speech` | macOS TTS with background queue, voice selection, rate control |
-| `daily-briefing` | Markets, TechCrunch, Hacker News, GitHub trending, news, 微博熱搜 |
-| `restart-cli` | Restart Claude Code / OpenCode session via AppleScript or cmux |
 | `hatch` | Guided creation of a new agent profile (this skill) |
+
+### Custom skills (your profile repo)
+
+Drop a skill directory into `<profile-repo>/skills/<skill-name>/` — it gets symlinked alongside the built-in skills when you run `setup.py install --profile`.
+
+If a profile skill has the **same name** as a built-in tamago skill, the profile version wins (shadow override).
+
+```
+your-profile/
+  skills/
+    daily-briefing/   ← your own daily briefing skill
+    my-custom-tool/   ← anything you like
+```
+
+Then reference it in your persona frontmatter just like any other skill:
+
+```yaml
+skills:
+  - text-to-speech
+  - daily-briefing
+  - my-custom-tool
+```
 
 Add a skill to your persona's frontmatter `skills:` list to activate it.
 
@@ -204,7 +228,7 @@ After editing `<name>.persona.md` or pulling tamago updates:
 
 ```bash
 cd ~/workspace/your-project
-python3 ~/workspace/tamago/setup.py install --profile ~/workspace/your-profile
+python3 ~/.tamago/setup.py install --profile ~/workspace/your-profile
 ```
 
 The `git-hooks/post-merge` hook (installed by `install-global`) does this automatically

@@ -268,7 +268,8 @@ class MainTests(unittest.TestCase):
             setup_module.Operation.INSTALL,
             Path(temp_dir),
             Path.cwd(),  # project_root = Path.cwd()
-            None,  # profile_root
+            None,        # profile_root
+            True,        # memory_sync (default)
         )
 
     def test_main_accepts_source_before_subcommand(self):
@@ -284,7 +285,8 @@ class MainTests(unittest.TestCase):
             setup_module.Operation.INSTALL,
             Path(temp_dir),
             Path.cwd(),  # project_root = Path.cwd()
-            None,  # profile_root
+            None,        # profile_root
+            True,        # memory_sync (default)
         )
 
     def test_main_returns_error_when_source_root_is_invalid(self):

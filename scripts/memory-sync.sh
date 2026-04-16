@@ -7,7 +7,7 @@
 #   UserPromptSubmit → --pull              (pull latest memory from remote)
 #   Stop             → --push             (commit + push local memory changes)
 #
-# ASSISTANT_SETUP_REPO: path to tamago repo (default: ~/workspace/tamago)
+# ASSISTANT_SETUP_REPO: path to tamago repo (default: ~/.tamago)
 # LAOMEI_MEMORY_SYNC:   set to 0 to disable all sync (offline/emergency)
 #
 # Profile repo discovery (priority order):
@@ -15,7 +15,7 @@
 #   2. PROFILE_REPO= line in $REPO/local.conf  (written by setup.py install --profile)
 #   3. Fall back to $REPO itself (legacy single-repo mode)
 
-REPO="${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}"
+REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 MEMORY_PATH="agents/memory"
 
 # Resolve PROFILE_REPO and MEMORY_SYNC: env var → local.conf → fallback

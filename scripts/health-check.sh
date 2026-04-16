@@ -13,7 +13,7 @@
 
 # ─── Path Resolution (mirrors memory-sync.sh) ─────────────────────────────────
 
-REPO="${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}"
+REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 
 if [ -f "$REPO/local.conf" ]; then
   [ -z "${PROFILE_REPO:-}" ] && \
@@ -243,9 +243,15 @@ section "4. Project Symlinks  ($PROJECT_DIR)"
 if [ -d "$PROJECT_DIR" ]; then
   check_symlink "$PROJECT_DIR/.claude/settings.json"         ".claude/settings.json"
   check_symlink "$PROJECT_DIR/.claude/skills/text-to-speech" ".claude/skills/text-to-speech"
-  check_symlink "$PROJECT_DIR/.claude/skills/daily-briefing" ".claude/skills/daily-briefing"
-  check_symlink "$PROJECT_DIR/.claude/skills/restart-cli"    ".claude/skills/restart-cli"
   check_symlink "$PROJECT_DIR/.opencode/opencode.json"       ".opencode/opencode.json"
+
+  # Check profile-specific skills (if profile has a skills/ dir)
+  if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
+    for skill_dir in "$PROFILE_REPO/skills"/*/; do
+      skill_name=$(basename "$skill_dir")
+      check_symlink "$PROJECT_DIR/.claude/skills/$skill_name" ".claude/skills/$skill_name"
+    done
+  fi
 
   if [ "$HAS_PROFILE" = false ]; then
     pass "agent symlinks" "no profile configured — skipping"

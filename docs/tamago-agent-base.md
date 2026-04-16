@@ -9,7 +9,7 @@ It covers tamago mechanics common to all agents: memory system, sync behavior, a
 After setup on a new machine, or when something feels off, run:
 
 ```bash
-bash ~/workspace/tamago/scripts/health-check.sh
+bash ~/.tamago/scripts/health-check.sh
 ```
 
 All green = good to go. Add `--fix` to auto-fix simple issues.
