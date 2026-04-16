@@ -134,6 +134,20 @@ check_symlink() {
   fi
 }
 
+# For merged/generated agent files (not symlinks — written by setup.py)
+check_generated() {
+  local file="$1" name="$2"
+  if [ -f "$file" ]; then
+    if grep -q "<!-- TAMAGO GENERATED" "$file" 2>/dev/null; then
+      pass "$name" "generated ✓"
+    else
+      warn "$name" "exists but missing TAMAGO GENERATED header (manual file?)"
+    fi
+  else
+    fail "$name" "missing — run: setup.py install --profile <profile>"
+  fi
+}
+
 # Use timeout if available; otherwise run directly (may hang on network issues)
 run_timed() {
   if command -v timeout &>/dev/null; then
@@ -234,9 +248,9 @@ if [ -d "$PROJECT_DIR" ]; then
   if [ "$HAS_PROFILE" = false ]; then
     pass "agent symlinks" "no profile configured — skipping"
   elif [ -n "$AGENT_NAME" ]; then
-    check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
-    check_symlink "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
-    check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
+    check_generated "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
+    check_symlink   "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
+    check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
   else
     warn "agent symlinks" "no agent name in profile settings — skipping"
   fi
