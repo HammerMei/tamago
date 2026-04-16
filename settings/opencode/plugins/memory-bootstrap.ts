@@ -101,7 +101,7 @@ async function loadMemoryIndex(
 
 async function runSessionInit(client: Parameters<Plugin>[0]["client"], sessionID: string): Promise<void> {
   if (process.env.LAOMEI_MEMORY_SYNC === "0") return;
-  const repo = process.env.ASSISTANT_SETUP_REPO ?? path.join(os.homedir(), "workspace", "assistant");
+  const repo = process.env.ASSISTANT_SETUP_REPO ?? path.join(os.homedir(), ".tamago");
   const scriptPath = path.join(repo, "scripts", "memory-sync.sh");
   try {
     await execFileAsync(scriptPath, ["--init", "opencode"]);
