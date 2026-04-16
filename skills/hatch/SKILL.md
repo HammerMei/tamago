@@ -66,11 +66,16 @@ python3 .claude/skills/hatch/hatch.py \
   [--remote "<url>"] \
   [--tts [--tts-voice "<voice>"]] \
   [--skills "<s1>,<s2>"] \
+  [--no-memory-sync] \
   --install
 ```
 
 `--install` runs `python3 setup.py install --profile <profile-dir>` in the current
 project directory automatically.
+
+If no `--remote` is given, add `--no-memory-sync` to disable git memory sync and avoid
+false failures in the health check. The user can enable sync later by removing
+`MEMORY_SYNC=0` from `local.conf` after setting up a remote.
 
 ## After success
 

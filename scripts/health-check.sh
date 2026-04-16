@@ -15,8 +15,10 @@
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}"
 
-if [ -z "${PROFILE_REPO:-}" ] && [ -f "$REPO/local.conf" ]; then
-  PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
+if [ -f "$REPO/local.conf" ]; then
+  [ -z "${PROFILE_REPO:-}" ] && \
+    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
+  MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
 fi
 PROFILE_REPO="${PROFILE_REPO:-$REPO}"
 
@@ -271,10 +273,14 @@ if [ -d "$REPO/.git" ]; then
   fi
 fi
 
+PROFILE_REMOTE_OK=false
 if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/.git" ]; then
-  remote=$(cd "$PROFILE_REPO" && git remote get-url origin 2>/dev/null || echo "no remote")
-  if (cd "$PROFILE_REPO" && run_timed git ls-remote --exit-code origin HEAD &>/dev/null); then
+  remote=$(cd "$PROFILE_REPO" && git remote get-url origin 2>/dev/null || echo "")
+  if [ -z "$remote" ]; then
+    warn "profile remote" "no remote configured — memory sync disabled"
+  elif (cd "$PROFILE_REPO" && run_timed git ls-remote --exit-code origin HEAD &>/dev/null); then
     pass "profile remote" "$remote"
+    PROFILE_REMOTE_OK=true
   else
     warn "profile remote" "unreachable — $remote"
   fi
@@ -284,7 +290,13 @@ fi
 
 section "6. Memory Sync"
 
-if [ "$HAS_PROFILE" = true ]; then
+if [ "$HAS_PROFILE" = false ]; then
+  pass "memory-sync --pull" "no profile configured — skipping"
+elif [ "${MEMORY_SYNC:-1}" = "0" ]; then
+  pass "memory-sync --pull" "disabled (MEMORY_SYNC=0 in local.conf) — skipping"
+elif [ "$PROFILE_REMOTE_OK" = false ]; then
+  pass "memory-sync --pull" "no reachable remote — skipping"
+else
   SYNC_OUT=$("$REPO/scripts/memory-sync.sh" --pull 2>&1)
   SYNC_EXIT=$?
   if [ $SYNC_EXIT -ne 0 ] || echo "$SYNC_OUT" | grep -qi "warning\|failed\|error"; then
@@ -292,8 +304,6 @@ if [ "$HAS_PROFILE" = true ]; then
   else
     pass "memory-sync --pull" "ok"
   fi
-else
-  pass "memory-sync --pull" "no profile configured — skipping"
 fi
 
 # ─── 7. Profile Extra Checks (optional) ──────────────────────────────────────

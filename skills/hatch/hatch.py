@@ -288,6 +288,11 @@ def parse_args() -> argparse.Namespace:
         help="Run `setup.py install --profile` in cwd after hatching",
     )
     p.add_argument(
+        "--no-memory-sync", action="store_true",
+        help="Disable git memory sync (writes MEMORY_SYNC=0 to local.conf); "
+             "useful when no remote is configured yet",
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="Preview what would be created without writing any files",
     )
@@ -343,11 +348,12 @@ def main() -> int:
 
     if args.install:
         setup_py = tamago_root / "setup.py"
-        print(f"\n▶ Running: python3 setup.py install --profile {profile_dir}")
-        result = subprocess.run(
-            [sys.executable, str(setup_py), "install", "--profile", str(profile_dir)],
-            check=False,
-        )
+        install_cmd = [sys.executable, str(setup_py), "install", "--profile", str(profile_dir)]
+        if getattr(args, "no_memory_sync", False):
+            install_cmd.append("--no-memory-sync")
+        print(f"\n▶ Running: python3 setup.py install --profile {profile_dir}"
+              + (" --no-memory-sync" if getattr(args, "no_memory_sync", False) else ""))
+        result = subprocess.run(install_cmd, check=False)
         if result.returncode != 0:
             print(
                 "warning: setup.py install returned a non-zero exit code.",

@@ -141,8 +141,9 @@ def write_local_conf(
     source_root: Path,
     profile_root: Path | None,
     project_root: Path | None = None,
+    memory_sync: bool = True,
 ):
-    """Write (or remove) PROFILE_REPO= and PROJECT_DIR= in <source_root>/local.conf."""
+    """Write (or remove) PROFILE_REPO=, PROJECT_DIR=, MEMORY_SYNC= in <source_root>/local.conf."""
     local_conf = source_root / "local.conf"
 
     if profile_root is None:
@@ -154,6 +155,8 @@ def write_local_conf(
     lines = [f"PROFILE_REPO={profile_root.resolve()}"]
     if project_root is not None:
         lines.append(f"PROJECT_DIR={project_root.resolve()}")
+    if not memory_sync:
+        lines.append("MEMORY_SYNC=0")
     content = "\n".join(lines) + "\n"
 
     if local_conf.exists() and local_conf.read_text() == content:
@@ -489,6 +492,7 @@ def setup(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
+    memory_sync: bool = True,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
@@ -497,9 +501,9 @@ def setup(
         setup_agents(operation, source_root, project_root, profile_root)
         setup_settings(operation, source_root, project_root, profile_root)
 
-        # Record (or remove) PROFILE_REPO + PROJECT_DIR in local.conf
+        # Record (or remove) PROFILE_REPO + PROJECT_DIR + MEMORY_SYNC in local.conf
         if operation == Operation.INSTALL:
-            write_local_conf(source_root, profile_root, project_root)
+            write_local_conf(source_root, profile_root, project_root, memory_sync)
             run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
             write_local_conf(source_root, None)
@@ -542,6 +546,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="profile",
         default=None,
         help="path to profile repo (persona, memory, agent-specific settings)",
+    )
+    profile_parser.add_argument(
+        "--no-memory-sync",
+        dest="no_memory_sync",
+        action="store_true",
+        default=False,
+        help="write MEMORY_SYNC=0 to local.conf — disables git-based memory sync",
     )
 
     parser = argparse.ArgumentParser(
@@ -611,7 +622,8 @@ def main() -> int:
 
     for op in Operation:
         if args.command == op.value:
-            return setup(op, source_root, project_root, profile_root)
+            memory_sync = not getattr(args, "no_memory_sync", False)
+            return setup(op, source_root, project_root, profile_root, memory_sync)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

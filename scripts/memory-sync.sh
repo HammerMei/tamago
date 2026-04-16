@@ -18,14 +18,17 @@
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/workspace/tamago}"
 MEMORY_PATH="agents/memory"
 
-# Resolve PROFILE_REPO: env var → local.conf → fallback to REPO
-if [ -z "$PROFILE_REPO" ] && [ -f "$REPO/local.conf" ]; then
-  PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
+# Resolve PROFILE_REPO and MEMORY_SYNC: env var → local.conf → fallback
+if [ -f "$REPO/local.conf" ]; then
+  [ -z "$PROFILE_REPO" ] && \
+    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
+  [ -z "$MEMORY_SYNC" ] && \
+    MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
 fi
 MEMORY_REPO="${PROFILE_REPO:-$REPO}"
 
-# Sync disabled
-if [ "${LAOMEI_MEMORY_SYNC:-1}" = "0" ]; then
+# Sync disabled — env var (LAOMEI_MEMORY_SYNC=0) or local.conf (MEMORY_SYNC=0)
+if [ "${LAOMEI_MEMORY_SYNC:-1}" = "0" ] || [ "${MEMORY_SYNC:-1}" = "0" ]; then
     exit 0
 fi
 
@@ -89,6 +92,8 @@ case "$1" in
     ;;
 
   --pull)
+    # Skip if no remote is configured
+    git -C "$MEMORY_REPO" remote get-url origin &>/dev/null 2>&1 || exit 0
     # Pull latest memory; surface warning to Claude context on failure
     if ! (cd "$MEMORY_REPO" && timeout 5 git pull --rebase --quiet) 2>/dev/null; then
       echo "Memory sync warning: git pull failed — you may be out of sync with other 分身. Consider running 'git pull --rebase' in $MEMORY_REPO manually."
@@ -104,6 +109,9 @@ case "$1" in
     # Commit local changes
     git add "$MEMORY_PATH" && \
       git commit -m "auto: sync memory on turn end" --quiet || exit 0
+
+    # Skip push if no remote is configured (commit is kept locally)
+    git remote get-url origin &>/dev/null 2>&1 || exit 0
 
     # Pull --rebase then push; surface systemMessage to user on failure
     if ! (git pull --rebase --quiet && git push --quiet) 2>/dev/null; then
