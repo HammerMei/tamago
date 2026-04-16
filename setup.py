@@ -33,7 +33,14 @@ class Operation(str, Enum):
     UNINSTALL = "uninstall"
 
 
-DEFAULT_SOURCE_ROOT = Path("~/.tamago").expanduser()
+# The directory containing this script is always the tamago repo root —
+# use it as the default so setup.py works regardless of where tamago is installed.
+DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent
+
+# Conventional install location — shell scripts fall back to this path when
+# ASSISTANT_SETUP_REPO is not set.  We skip env injection only when tamago
+# is actually installed here (the fallback already covers it).
+CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
 GITIGNORE_ENTRIES = (".claude", ".opencode")
 
 
@@ -426,7 +433,7 @@ def setup_shell_env(operation: Operation, source_root: Path):
     comment = "# Tamago assistant repo"
 
     if operation == Operation.INSTALL:
-        if source_root == DEFAULT_SOURCE_ROOT:
+        if source_root == CONVENTIONAL_ROOT:
             print(f"skip    {env_key} injection (using default path, fallback covers it)")
             return
 
