@@ -17,8 +17,10 @@ then materialize the files via `hatch.py`.
 <profile-dir>/
   .gitignore
   agents/
-    <name>.persona.md          ← persona + optional TTS instructions
-    memory/<name>/MEMORY.md    ← empty memory index
+    <name>.persona.md                    ← persona + optional TTS instructions
+    memory/<name>/MEMORY.md              ← memory index (with birth_certificate pointer)
+    memory/<name>/birth_certificate.md   ← 🥚 easter egg: birth timestamp, zodiac,
+                                            hostname, hatcher lineage, tamago DNA
   settings/
     claude/settings.json       ← {"agent": "<name>"}
     opencode/opencode.json     ← {"default_agent": "<name>"}
@@ -87,9 +89,26 @@ python3 .claude/skills/hatch/hatch.py \
   [--remote "<url>"] \
   [--tts [--tts-voice "<voice>"]] \
   [--skills "<s1>,<s2>"] \
+  [--hatcher "<your-agent-name>"] \
+  [--lineage "<ancestor-chain>"] \
   [--no-memory-sync] \
   --install
 ```
+
+#### Determining `--hatcher` and `--lineage`
+
+Before running `hatch.py`, resolve the birth lineage:
+
+1. **You have an agent name** (you are a named persona, not plain Claude):
+   - Pass `--hatcher <your-agent-name>`
+   - Check if your own `birth_certificate.md` exists at `$PROFILE_REPO/agents/memory/<your-agent-name>/birth_certificate.md`
+   - If it exists: read the `家族族譜` row value (e.g. `石頭蹦出來的 🪨 → hammer.mei`)
+     and pass `--lineage "<that-value> → <your-agent-name>"`
+   - If it doesn't exist: omit `--lineage` (defaults to just your name)
+
+2. **Bootstrap case** (plain Claude, no agent persona):
+   - Omit both `--hatcher` and `--lineage`
+   - hatch.py will record the hatcher as `石頭蹦出來的 🪨` 🪨
 
 If no `--remote` is given, add `--no-memory-sync` to disable git memory sync and avoid
 false failures in the health check. The user can enable sync later by removing

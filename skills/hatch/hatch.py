@@ -30,8 +30,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -43,10 +45,90 @@ from pathlib import Path
 DEFAULT_TAMAGO_ROOT = Path("~/.tamago").expanduser()
 TEMPLATES_DIR = "templates"
 
+# Chinese zodiac animals in cycle order (index 0 = Rat, starting from year 4 CE)
+_CHINESE_ZODIAC = [
+    "鼠 🐭", "牛 🐮", "虎 🐯", "兔 🐰", "龍 🐲", "蛇 🐍",
+    "馬 🐴", "羊 🐑", "猴 🐵", "雞 🐔", "狗 🐶", "豬 🐷",
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def chinese_zodiac(year: int) -> str:
+    return _CHINESE_ZODIAC[(year - 4) % 12]
+
+
+def western_zodiac(month: int, day: int) -> str:
+    md = (month, day)
+    if md >= (12, 22) or md <= (1, 19): return "魔羯座 ♑"
+    if md <= (2, 18):  return "水瓶座 ♒"
+    if md <= (3, 20):  return "雙魚座 ♓"
+    if md <= (4, 19):  return "牡羊座 ♈"
+    if md <= (5, 20):  return "金牛座 ♉"
+    if md <= (6, 20):  return "雙子座 ♊"
+    if md <= (7, 22):  return "巨蟹座 ♋"
+    if md <= (8, 22):  return "獅子座 ♌"
+    if md <= (9, 22):  return "處女座 ♍"
+    if md <= (10, 22): return "天秤座 ♎"
+    if md <= (11, 21): return "天蠍座 ♏"
+    return "射手座 ♐"
+
+
+def get_tamago_dna(tamago_root: Path) -> str:
+    """Return the short git commit hash of tamago at hatch time (8 chars)."""
+    result = subprocess.run(
+        ["git", "-C", str(tamago_root), "rev-parse", "--short=8", "HEAD"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def build_birth_certificate(
+    *,
+    agent_name: str,
+    display_name: str,
+    birth_dt: datetime.datetime,
+    hatcher: str,
+    lineage: str,
+    tamago_root: Path,
+    templates_dir: Path,
+) -> str:
+    """Render birth_certificate.md content from template."""
+    tmpl_path = templates_dir / "birth_certificate.md.tmpl"
+    if tmpl_path.exists():
+        tmpl = tmpl_path.read_text()
+    else:
+        # Inline fallback if template is missing
+        tmpl = (
+            "---\nname: Birth Certificate\n"
+            "description: Immutable origin record\ntype: reference\n---\n\n"
+            "# 🥚 出生證明 — {{display_name}}\n\n"
+            "| 欄位 | 內容 |\n|------|------|\n"
+            "| **姓名** | `{{agent_name}}` |\n"
+            "| **生日** | {{birth_datetime}} |\n"
+            "| **生肖** | {{chinese_zodiac}} |\n"
+            "| **星座** | {{western_zodiac}} |\n"
+            "| **出生地** | `{{hostname}}` |\n"
+            "| **孵化者** | {{hatcher}} |\n"
+            "| **家族族譜** | {{lineage}} |\n"
+            "| **tamago DNA** | `{{tamago_dna}}` |\n"
+        )
+
+    variables = {
+        "agent_name": agent_name,
+        "display_name": display_name,
+        "birth_datetime": birth_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "chinese_zodiac": chinese_zodiac(birth_dt.year),
+        "western_zodiac": western_zodiac(birth_dt.month, birth_dt.day),
+        "hostname": socket.gethostname(),
+        "hatcher": hatcher or "石頭蹦出來的 🪨",
+        "lineage": lineage or hatcher or "石頭蹦出來的 🪨",
+        "tamago_dna": get_tamago_dna(tamago_root),
+    }
+    return render(tmpl, variables)
+
 
 def resolve_tamago_root(source_override: str | None) -> Path:
     """Resolve tamago root: explicit arg > ASSISTANT_SETUP_REPO env var > default."""
@@ -107,6 +189,8 @@ def create_profile(
     tts_voice: str,
     skills: list[str],
     tamago_root: Path,
+    hatcher: str,
+    lineage: str,
     dry_run: bool,
 ) -> None:
     """Scaffold the full profile directory structure."""
@@ -129,6 +213,8 @@ def create_profile(
         "skills_yaml": build_skills_yaml(effective_skills),
         "tts_section": tts_section,
     }
+
+    birth_dt = datetime.datetime.now()
 
     # --- Load templates ---
     persona_tmpl = templates_dir / "agent.persona.md.tmpl"
@@ -166,10 +252,21 @@ def create_profile(
         indent=2,
     ) + "\n"
 
+    birth_cert_content = build_birth_certificate(
+        agent_name=name,
+        display_name=display_name,
+        birth_dt=birth_dt,
+        hatcher=hatcher,
+        lineage=lineage,
+        tamago_root=tamago_root,
+        templates_dir=templates_dir,
+    )
+
     # --- Files to create ---
     files: list[tuple[Path, str]] = [
         (profile_dir / "agents" / f"{name}.persona.md", persona_content),
         (profile_dir / "agents" / "memory" / name / "MEMORY.md", memory_content),
+        (profile_dir / "agents" / "memory" / name / "birth_certificate.md", birth_cert_content),
         (profile_dir / "settings" / "claude" / "settings.json", claude_settings_content),
         (profile_dir / "settings" / "opencode" / "opencode.json", opencode_settings_content),
         (profile_dir / ".gitignore", gitignore_content),
@@ -179,6 +276,13 @@ def create_profile(
         print("🥚 DRY RUN — no files will be written\n")
         for path, _ in files:
             print(f"  create  {path}")
+        print(f"\n  birth_datetime : {birth_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  chinese_zodiac : {chinese_zodiac(birth_dt.year)}")
+        print(f"  western_zodiac : {western_zodiac(birth_dt.month, birth_dt.day)}")
+        print(f"  hostname       : {socket.gethostname()}")
+        print(f"  hatcher        : {hatcher or '石頭蹦出來的 🪨'}")
+        print(f"  lineage        : {lineage or hatcher or '石頭蹦出來的 🪨'}")
+        print(f"  tamago_dna     : {get_tamago_dna(tamago_root)}")
         print(f"\n  git init  {profile_dir}")
         if remote:
             print(f"  remote    origin → {remote}")
@@ -293,6 +397,21 @@ def parse_args() -> argparse.Namespace:
              "useful when no remote is configured yet",
     )
     p.add_argument(
+        "--hatcher", default="",
+        help=(
+            "Agent name of whoever is running hatch (e.g. 'hammer.mei'). "
+            "Leave empty for the bootstrap case — defaults to '石頭蹦出來的 🪨'."
+        ),
+    )
+    p.add_argument(
+        "--lineage", default="",
+        help=(
+            "Full ancestor chain to record in birth_certificate.md "
+            "(e.g. '石頭蹦出來的 🪨 → hammer.mei'). "
+            "Defaults to just the --hatcher name when omitted."
+        ),
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="Preview what would be created without writing any files",
     )
@@ -335,6 +454,8 @@ def main() -> int:
             tts_voice=args.tts_voice,
             skills=skills,
             tamago_root=tamago_root,
+            hatcher=args.hatcher,
+            lineage=args.lineage,
             dry_run=args.dry_run,
         )
     except Exception as exc:
