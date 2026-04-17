@@ -33,7 +33,12 @@ elif [ -f "$REPO/local.conf" ]; then
   [ -z "$MEMORY_SYNC" ] && \
     MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
 fi
-MEMORY_REPO="${PROFILE_REPO:-$REPO}"
+# No profile configured — skip entirely to avoid writing memory into the tamago engine repo.
+# (Legacy single-repo mode is no longer supported; configure PROFILE_REPO to enable sync.)
+if [ -z "$PROFILE_REPO" ]; then
+    exit 0
+fi
+MEMORY_REPO="$PROFILE_REPO"
 
 # Sync disabled — env var (LAOMEI_MEMORY_SYNC=0) or local.conf (MEMORY_SYNC=0)
 if [ "${LAOMEI_MEMORY_SYNC:-1}" = "0" ] || [ "${MEMORY_SYNC:-1}" = "0" ]; then
