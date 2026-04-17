@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 # Profile repos cloned alongside tamago (each has its own .git)
 *-profile/
+# Memory files belong in profile repos, never in tamago engine repo
+agents/memory/
