@@ -167,6 +167,7 @@ def write_local_conf(
     profile_root: Path | None,
     project_root: Path | None = None,
     memory_sync: bool = True,
+    tts_enabled: bool = True,
 ):
     """Write (or remove) project-scoped tamago.conf and tamago's global local.conf."""
     # ── Project-scoped config (.tamago/tamago.conf) ──────────────────────────
@@ -180,6 +181,8 @@ def write_local_conf(
             lines = [f"PROFILE_REPO={profile_root.resolve()}"]
             if not memory_sync:
                 lines.append("MEMORY_SYNC=0")
+            if not tts_enabled:
+                lines.append("TTS_ENABLED=0")
             _write_conf_file(project_conf, lines)
 
     # ── Global cache (tamago/local.conf) — used by memory-sync.sh ────────────
@@ -195,6 +198,8 @@ def write_local_conf(
         lines.append(f"PROJECT_DIR={project_root.resolve()}")
     if not memory_sync:
         lines.append("MEMORY_SYNC=0")
+    if not tts_enabled:
+        lines.append("TTS_ENABLED=0")
     _write_conf_file(local_conf, lines)
 
 
@@ -249,6 +254,7 @@ def _merge_agent(
     profile_root: Path,
     persona_file: Path,
     target_dir: Path,
+    tts_enabled: bool = True,
 ) -> None:
     """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md."""
     # agent_name: strip the ".persona" suffix  (hammer.mei.persona.md → hammer.mei)
@@ -292,6 +298,16 @@ def _merge_agent(
 
     merged = frontmatter + header + base_content + "\n\n---\n\n" + body
 
+    if not tts_enabled:
+        merged += (
+            "\n\n---\n\n"
+            "<!-- DEPLOYMENT OVERRIDE: TTS DISABLED -->\n"
+            "## TTS Override\n"
+            "**This deployment has TTS disabled** (set via `--no-tts` at install time).\n"
+            "Do NOT invoke the `text-to-speech` skill or any audio output tool.\n"
+            "Respond in text only, regardless of any persona TTS instructions above.\n"
+        )
+
     target_dir.mkdir(parents=True, exist_ok=True)
     output = target_dir / f"{agent_name}.md"
     output.write_text(merged)
@@ -318,6 +334,7 @@ def setup_agents(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
+    tts_enabled: bool = True,
 ):
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
@@ -353,8 +370,8 @@ def setup_agents(
 
             for persona_file in sorted((profile_root / "agents").iterdir()):
                 if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
-                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root)
-                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root)
+                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root, tts_enabled)
+                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root, tts_enabled)
 
         # 3. Memory dirs from profile (or tamago fallback)
         if profile_root and (profile_root / "agents" / "memory").is_dir():
@@ -554,6 +571,7 @@ def setup(
     project_root: Path,
     profile_root: Path | None = None,
     memory_sync: bool = True,
+    tts_enabled: bool = True,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
@@ -575,12 +593,12 @@ def setup(
 
         setup_gitignore(operation, project_root)
         setup_skills(operation, source_root, project_root, profile_root)
-        setup_agents(operation, source_root, project_root, profile_root)
+        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled)
         setup_settings(operation, source_root, project_root, profile_root)
 
         # Record (or remove) PROFILE_REPO + PROJECT_DIR + MEMORY_SYNC in local.conf
         if operation == Operation.INSTALL:
-            write_local_conf(source_root, profile_root, project_root, memory_sync)
+            write_local_conf(source_root, profile_root, project_root, memory_sync, tts_enabled)
             run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
             write_local_conf(source_root, None)
@@ -724,6 +742,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="write MEMORY_SYNC=0 to local.conf — disables git-based memory sync",
     )
 
+    profile_parser.add_argument(
+        "--no-tts",
+        dest="no_tts",
+        action="store_true",
+        default=False,
+        help="disable TTS in generated agent files — useful for RC/headless deployments",
+    )
+
     parser = argparse.ArgumentParser(
         description="Tamago — AI agent setup tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -809,7 +835,21 @@ def main() -> int:
     for op in Operation:
         if args.command == op.value:
             memory_sync = not getattr(args, "no_memory_sync", False)
-            return setup(op, source_root, project_root, profile_root, memory_sync)
+            tts_enabled = not getattr(args, "no_tts", False)
+            # Read TTS_ENABLED from local.conf if --no-tts not explicitly passed
+            if tts_enabled:
+                for conf_path in [
+                    project_root / ".tamago" / PROJECT_CONF_NAME if project_root else None,
+                    source_root / "local.conf",
+                ]:
+                    if conf_path and conf_path.exists():
+                        for line in conf_path.read_text().splitlines():
+                            if line.strip() == "TTS_ENABLED=0":
+                                tts_enabled = False
+                                break
+                    if not tts_enabled:
+                        break
+            return setup(op, source_root, project_root, profile_root, memory_sync, tts_enabled)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
