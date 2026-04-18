@@ -11,7 +11,9 @@ install [--source <tamago>] [--profile <profile_repo>]
     Symlink skills, agents, settings, and memory into the current project
     directory (.claude/, .opencode/).  When --profile is given, agent/persona
     files come from the profile repo and PROFILE_REPO is recorded in
-    <tamago>/local.conf so memory-sync.sh knows where to do git operations.
+    <project>/.tamago/tamago.conf so memory-sync.sh knows where to do git
+    operations.  A project without tamago.conf is treated as a non-tamago
+    project — memory-sync skips it silently.
 
 uninstall [--source <tamago>] [--profile <profile_repo>]
     Reverse of install — remove all symlinks created by install.
@@ -146,9 +148,10 @@ def setup_gitignore(operation: Operation, project_root: Path):
 # ---------------------------------------------------------------------------
 #
 # Config is stored in <project_dir>/.tamago/tamago.conf (project-scoped) so
-# multiple projects can each use a different profile without overwriting each
-# other.  tamago's global local.conf is also written as a convenience cache
-# for memory-sync.sh (which may not have easy access to the project dir).
+# multiple projects can each use a different profile without interfering with
+# each other.  Presence of tamago.conf is the canonical signal that a project
+# has a tamago agent installed — memory-sync.sh exits 0 silently when it is
+# absent.  There is no global local.conf fallback.
 
 PROJECT_CONF_NAME = "tamago.conf"  # lives inside <project_dir>/.tamago/
 
@@ -163,45 +166,32 @@ def _write_conf_file(path: Path, lines: list[str]) -> None:
     print(f"updated {path}")
 
 
-def write_local_conf(
-    source_root: Path,
+def write_project_conf(
     profile_root: Path | None,
     project_root: Path | None = None,
     memory_sync: bool = True,
     tts_enabled: bool = True,
 ):
-    """Write (or remove) project-scoped tamago.conf and tamago's global local.conf."""
-    # ── Project-scoped config (.tamago/tamago.conf) ──────────────────────────
-    if project_root is not None:
-        project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
-        if profile_root is None:
-            if project_conf.exists():
-                project_conf.unlink()
-                print(f"removed {project_conf}")
-        else:
-            lines = [f"PROFILE_REPO={profile_root.resolve()}"]
-            if not memory_sync:
-                lines.append("MEMORY_SYNC=0")
-            if not tts_enabled:
-                lines.append("TTS_ENABLED=0")
-            _write_conf_file(project_conf, lines)
+    """Write (or remove) the project-scoped .tamago/tamago.conf.
 
-    # ── Global cache (tamago/local.conf) — used by memory-sync.sh ────────────
-    local_conf = source_root / "local.conf"
-    if profile_root is None:
-        if local_conf.exists():
-            local_conf.unlink()
-            print(f"removed {local_conf}")
+    Presence of this file is the canonical signal that a project has a tamago
+    agent installed.  memory-sync.sh exits silently when it is absent — there
+    is no global local.conf fallback.
+    """
+    if project_root is None:
         return
-
+    project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+    if profile_root is None:
+        if project_conf.exists():
+            project_conf.unlink()
+            print(f"removed {project_conf}")
+        return
     lines = [f"PROFILE_REPO={profile_root.resolve()}"]
-    if project_root is not None:
-        lines.append(f"PROJECT_DIR={project_root.resolve()}")
     if not memory_sync:
         lines.append("MEMORY_SYNC=0")
     if not tts_enabled:
         lines.append("TTS_ENABLED=0")
-    _write_conf_file(local_conf, lines)
+    _write_conf_file(project_conf, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -660,12 +650,12 @@ def setup(
         setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled)
         setup_settings(operation, source_root, project_root, profile_root)
 
-        # Record (or remove) PROFILE_REPO + PROJECT_DIR + MEMORY_SYNC in local.conf
+        # Record (or remove) PROFILE_REPO + MEMORY_SYNC in project-scoped tamago.conf
         if operation == Operation.INSTALL:
-            write_local_conf(source_root, profile_root, project_root, memory_sync, tts_enabled)
+            write_project_conf(profile_root, project_root, memory_sync, tts_enabled)
             run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
-            write_local_conf(source_root, None)
+            write_project_conf(None, project_root)
 
         return 0
     except Exception as e:
@@ -803,7 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_memory_sync",
         action="store_true",
         default=False,
-        help="write MEMORY_SYNC=0 to local.conf — disables git-based memory sync",
+        help="write MEMORY_SYNC=0 to tamago.conf — disables git-based memory sync",
     )
 
     profile_parser.add_argument(
@@ -910,33 +900,19 @@ def main() -> int:
     # project-scoped .tamago/tamago.conf — correct even with multiple projects.
     if profile_root is None and args.command == Operation.UNINSTALL.value:
         project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
-        fallback_conf = project_conf if project_conf.exists() else source_root / "local.conf"
-        if fallback_conf.exists():
-            for line in fallback_conf.read_text().splitlines():
+        if project_conf.exists():
+            for line in project_conf.read_text().splitlines():
                 if line.startswith("PROFILE_REPO="):
                     candidate = Path(line.split("=", 1)[1].strip())
                     if candidate.is_dir():
                         profile_root = candidate
-                        print(f"info    using PROFILE_REPO from {fallback_conf.name}: {profile_root}")
+                        print(f"info    using PROFILE_REPO from tamago.conf: {profile_root}")
                     break
 
     for op in Operation:
         if args.command == op.value:
             memory_sync = not getattr(args, "no_memory_sync", False)
             tts_enabled = not getattr(args, "no_tts", False)
-            # Read TTS_ENABLED from local.conf if --no-tts not explicitly passed
-            if tts_enabled:
-                for conf_path in [
-                    project_root / ".tamago" / PROJECT_CONF_NAME if project_root else None,
-                    source_root / "local.conf",
-                ]:
-                    if conf_path and conf_path.exists():
-                        for line in conf_path.read_text().splitlines():
-                            if line.strip() == "TTS_ENABLED=0":
-                                tts_enabled = False
-                                break
-                    if not tts_enabled:
-                        break
             return setup(op, source_root, project_root, profile_root, memory_sync, tts_enabled)
 
     parser.error(f"Unknown command: {args.command}")

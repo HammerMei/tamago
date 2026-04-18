@@ -37,18 +37,15 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ─── Profile resolution (project-scoped conf takes priority) ──────────────────
-# Priority: env var → <project>/.tamago/tamago.conf → global local.conf
+# ─── Profile resolution (project-scoped conf only — no global fallback) ───────
+# Presence of .tamago/tamago.conf is the canonical signal that a project has a
+# tamago agent installed.  Without it, profile checks are skipped.
 
 PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
 if [ -f "$PROJECT_CONF" ]; then
   [ -z "${PROFILE_REPO:-}" ] && \
     PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
   MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
-elif [ -f "$REPO/local.conf" ]; then
-  [ -z "${PROFILE_REPO:-}" ] && \
-    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
-  MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
 fi
 PROFILE_REPO="${PROFILE_REPO:-$REPO}"
 
@@ -217,11 +214,11 @@ section "2. Repos & Paths"
   || fail "profile repo" "not found: $PROFILE_REPO"
 
 if [ "$HAS_PROFILE" = true ]; then
-  [ -f "$REPO/local.conf" ] \
-    && pass "local.conf" "PROFILE_REPO=$(grep '^PROFILE_REPO=' "$REPO/local.conf" | cut -d= -f2-)" \
-    || warn "local.conf" "missing — PROFILE_REPO may not resolve correctly"
+  [ -f "$PROJECT_CONF" ] \
+    && pass "tamago.conf" "PROFILE_REPO=$(grep '^PROFILE_REPO=' "$PROJECT_CONF" | cut -d= -f2-)" \
+    || warn "tamago.conf" "missing — run: setup.py install --profile <profile>"
 else
-  pass "local.conf" "no profile configured — skipping"
+  pass "tamago.conf" "no profile configured — skipping"
 fi
 
 [ -d "$HOME/.kpx-keys" ] \
@@ -307,7 +304,7 @@ section "6. Memory Sync"
 if [ "$HAS_PROFILE" = false ]; then
   pass "memory-sync --pull" "no profile configured — skipping"
 elif [ "${MEMORY_SYNC:-1}" = "0" ]; then
-  pass "memory-sync --pull" "disabled (MEMORY_SYNC=0 in local.conf) — skipping"
+  pass "memory-sync --pull" "disabled (MEMORY_SYNC=0 in tamago.conf) — skipping"
 elif [ "$PROFILE_REMOTE_OK" = false ]; then
   pass "memory-sync --pull" "no reachable remote — skipping"
 else
