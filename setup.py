@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -296,17 +297,13 @@ def _merge_agent(
         f"-->\n\n"
     )
 
-    merged = frontmatter + header + base_content + "\n\n---\n\n" + body
-
     if not tts_enabled:
-        merged += (
-            "\n\n---\n\n"
-            "<!-- DEPLOYMENT OVERRIDE: TTS DISABLED -->\n"
-            "## TTS Override\n"
-            "**This deployment has TTS disabled** (set via `--no-tts` at install time).\n"
-            "Do NOT invoke the `text-to-speech` skill or any audio output tool.\n"
-            "Respond in text only, regardless of any persona TTS instructions above.\n"
-        )
+        # Strip ## TTS section from persona body (## TTS up to next ## heading or end)
+        body = re.sub(r"\n## TTS\n.*?(?=\n## |\Z)", "", body, flags=re.DOTALL)
+        # Remove text-to-speech from skills list in frontmatter
+        frontmatter = re.sub(r"^(\s*-\s*text-to-speech\s*\n)", "", frontmatter, flags=re.MULTILINE)
+
+    merged = frontmatter + header + base_content + "\n\n---\n\n" + body
 
     target_dir.mkdir(parents=True, exist_ok=True)
     output = target_dir / f"{agent_name}.md"
