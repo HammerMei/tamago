@@ -107,7 +107,7 @@ case "$1" in
   --pull)
     # Skip if no remote is configured
     git -C "$MEMORY_REPO" remote get-url origin &>/dev/null 2>&1 || exit 0
-    # Pull latest memory; surface warning to Claude context on failure
+    # Pull latest memory; surface warning to both Claude context and CLI on failure
     if ! (cd "$MEMORY_REPO" && timeout 5 git pull --rebase --quiet) 2>/dev/null; then
       echo "Memory sync warning: git pull failed — you may be out of sync with other 分身. Consider running 'git pull --rebase' in $MEMORY_REPO manually."
     fi

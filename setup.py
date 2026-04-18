@@ -511,6 +511,20 @@ def setup_shell_env(operation: Operation, source_root: Path):
 # Top-level orchestrators
 # ---------------------------------------------------------------------------
 
+def pull_repo(path: Path, label: str) -> None:
+    """git pull --rebase on a repo; warn on failure, never block the install."""
+    if not (path / ".git").exists():
+        return
+    result = subprocess.run(
+        ["git", "-C", str(path), "pull", "--rebase", "--quiet"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"warning git pull failed in {label}: {result.stderr.strip()}", file=sys.stderr)
+    else:
+        print(f"pulled  {label}")
+
+
 def run_health_check(source_root: Path, project_root: Path) -> None:
     """Run health-check.sh after install to surface any environment issues."""
     health_check = source_root / "scripts" / "health-check.sh"
@@ -523,6 +537,51 @@ def run_health_check(source_root: Path, project_root: Path) -> None:
         ["bash", str(health_check), "--project", str(project_root)],
         check=False,
     )
+
+
+def setup_local_bin(operation: Operation, source_root: Path) -> None:
+    """Symlink the tamago CLI wrapper into ~/.local/bin and ensure it is on PATH."""
+    local_bin = Path("~/.local/bin").expanduser()
+    tamago_bin = source_root / "bin" / "tamago"
+    target = local_bin / "tamago"
+
+    if operation == Operation.INSTALL:
+        if not tamago_bin.exists():
+            raise Exception(f"tamago bin script not found: {tamago_bin}")
+
+        local_bin.mkdir(parents=True, exist_ok=True)
+
+        if target.is_symlink():
+            if target.resolve() == tamago_bin.resolve():
+                print(f"exists  {target} -> {tamago_bin}")
+            else:
+                target.unlink()
+                target.symlink_to(tamago_bin)
+                print(f"linked  {target} -> {tamago_bin}")
+        elif target.exists():
+            raise Exception(f"skip    {target} (already exists and is not a symlink — remove it manually)")
+        else:
+            target.symlink_to(tamago_bin)
+            print(f"linked  {target} -> {tamago_bin}")
+
+        # Add ~/.local/bin to PATH in ~/.zshrc if not already present
+        zshrc = Path("~/.zshrc").expanduser()
+        path_line = 'export PATH="$HOME/.local/bin:$PATH"'
+        path_marker = ".local/bin"
+        lines = zshrc.read_text().splitlines() if zshrc.exists() else []
+        if any(path_marker in l for l in lines):
+            print(f"exists  {path_marker} in ~/.zshrc PATH")
+        else:
+            with open(zshrc, "a") as f:
+                f.write(f"\n# tamago CLI\n{path_line}\n")
+            print(f"added   {path_marker} to ~/.zshrc PATH  (run: source ~/.zshrc)")
+
+    elif operation == Operation.UNINSTALL:
+        if target.is_symlink():
+            target.unlink()
+            print(f"removed {target}")
+        else:
+            print(f"skip    {target} not found")
 
 
 def setup_git_hooks(operation: Operation, source_root: Path) -> None:
@@ -552,6 +611,7 @@ def setup_global(operation: Operation, source_root: Path) -> int:
         lambda: setup_global_settings(operation, source_root),
         lambda: setup_shell_env(operation, source_root),
         lambda: setup_git_hooks(operation, source_root),
+        lambda: setup_local_bin(operation, source_root),
     ):
         try:
             step()
@@ -779,6 +839,19 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[source_parser, profile_parser],
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="run health check for the current (or specified) project",
+        parents=[source_parser],
+    )
+    doctor_parser.add_argument(
+        "--project",
+        dest="project",
+        default=None,
+        metavar="PATH",
+        help="project directory to check (default: current working directory)",
+    )
+
     return parser
 
 
@@ -797,6 +870,14 @@ def main() -> int:
         print(e, file=sys.stderr)
         return 1
 
+    if args.command in ("install", "install-global"):
+        pull_repo(source_root, "tamago")
+
+    if args.command == "doctor":
+        project = Path(getattr(args, "project", None) or Path.cwd()).expanduser().resolve()
+        run_health_check(source_root, project)
+        return 0
+
     if args.command == "install-global":
         return setup_global(Operation.INSTALL, source_root)
 
@@ -814,6 +895,9 @@ def main() -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
+
+    if args.command == Operation.INSTALL.value and profile_root is not None:
+        pull_repo(profile_root, "profile")
 
     # Uninstall fallback: if no profile flag given, read PROFILE_REPO from the
     # project-scoped .tamago/tamago.conf — correct even with multiple projects.

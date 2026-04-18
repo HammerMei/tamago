@@ -57,7 +57,8 @@ Memory syncs automatically via git hooks (configured in `settings/claude/setting
 - **Before each prompt (UserPromptSubmit)**: `git pull --rebase` to fetch latest memory
 - **After each reply (Stop)**: if `agents/memory/` changed, commit → pull → push
 - Push failures surface as a `systemMessage` warning
-- Pull failures are injected into Claude context as a note
+- Pull failures are injected into Claude context as a note — **if you see a sync warning in context, proactively tell the user at the start of your reply, even if they only said "Hi"**
+- Note: `UserPromptSubmit` hook stdout → context only; stderr and `systemMessage` JSON are both swallowed. `write $USER tty` is also unreliable (TUI refresh hides it). Agent proactive reporting is the only reliable channel for pull failure warnings.
 
 `MEMORY_SYNC=0` in `tamago/local.conf` (or env var `LAOMEI_MEMORY_SYNC=0`) disables all sync.
 
