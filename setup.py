@@ -214,19 +214,26 @@ def setup_settings(
     project_root: Path,
     profile_root: Path | None = None,
 ):
-    # When a profile is given, the project-level settings come from the profile
-    # (which contains the agent name).  Otherwise fall back to tamago's common
-    # settings (no agent name — suitable for generic / multi-persona projects).
-    settings_source = profile_root if profile_root else source_root
-    claude_setting_file = settings_source / "settings" / "claude" / "settings.json"
-    opencode_setting_file = settings_source / "settings" / "opencode" / "opencode.json"
+    if profile_root:
+        # Profile case: symlink ALL *.json files from the profile's settings dirs
+        # so profiles can ship any per-profile config (e.g. agent-emojis.json)
+        # without tamago needing to know about them ahead of time.
+        claude_dir = profile_root / "settings" / "claude"
+        opencode_dir = profile_root / "settings" / "opencode"
+        claude_files = sorted(claude_dir.glob("*.json")) if claude_dir.is_dir() else []
+        opencode_files = sorted(opencode_dir.glob("*.json")) if opencode_dir.is_dir() else []
+    else:
+        # No profile: only the canonical settings.json from tamago global
+        # (no agent name — suitable for generic / multi-persona projects).
+        claude_files = [source_root / "settings" / "claude" / "settings.json"]
+        opencode_files = [source_root / "settings" / "opencode" / "opencode.json"]
 
     if operation == Operation.INSTALL:
-        symlink_paths([claude_setting_file], project_root / ".claude")
-        symlink_paths([opencode_setting_file], project_root / ".opencode")
+        symlink_paths(claude_files, project_root / ".claude")
+        symlink_paths(opencode_files, project_root / ".opencode")
     elif operation == Operation.UNINSTALL:
-        unlink_paths([claude_setting_file], project_root / ".claude")
-        unlink_paths([opencode_setting_file], project_root / ".opencode")
+        unlink_paths(claude_files, project_root / ".claude")
+        unlink_paths(opencode_files, project_root / ".opencode")
 
 
 def setup_global_settings(operation: Operation, source_root: Path):

@@ -52,7 +52,12 @@ Then present a single table with proposed defaults and ask the user to confirm o
 | `--remote` | (none — skip for local-only) |
 | TTS enabled | no |
 | `--tts-voice` | `Meijia` (zh-TW) / `Samantha` (en-US), only if TTS enabled |
+| `--emoji` | auto-selected based on persona description (see below) |
 | `--skills` | `text-to-speech` (if TTS), else none |
+
+**Emoji selection**: Pick an emoji that reflects the agent's personality and theme based on
+the description and tone. Choose something distinctive so it's recognizable in the status line
+at a glance. Present your pick in the table and let the user confirm or swap it out.
 
 ### Turn 2 — user confirms or revises values
 
@@ -99,6 +104,7 @@ python3 .claude/skills/hatch/hatch.py \
   --language "<language>" \
   --tone "<tone>" \
   --user-address "<user-address>" \
+  --emoji "<emoji>" \
   --profile-dir "<profile-dir>" \
   [--remote "<url>"] \
   [--tts [--tts-voice "<voice>"]] \
