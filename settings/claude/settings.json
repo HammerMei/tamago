@@ -40,9 +40,10 @@
       }
     ]
   },
-  "autoDreamEnabled": true,
   "statusLine": {
     "type": "command",
     "command": "bash -c 'json=$(cat); model=$(echo \"$json\" | jq -r \".model.display_name\"); cost=$(echo \"$json\" | jq -r \".cost.total_cost_usd\" | awk \"{printf \\\"%.2f\\\", \\$1}\"); ctx=$(echo \"$json\" | jq -r \".context_window.used_percentage\"); ctx_size=$(echo \"$json\" | jq -r \".context_window.context_window_size / 1000 | floor | tostring + \\\"k\\\"\"); cwd=$(echo \"$json\" | jq -r \".cwd\"); project_dir=$(echo \"$json\" | jq -r \".workspace.project_dir\"); project_name=$(basename \"$project_dir\"); if [ \"$cwd\" = \"$project_dir\" ]; then rel=\"$project_name\"; else rel=\"$project_name/${cwd#$project_dir/}\"; fi; branch=$(git -C \"$cwd\" branch --show-current 2>/dev/null); ESC=$(printf \"\\033\"); agent=$(echo \"$json\" | jq -r \".agent.name // \\\"default\\\"\"); project_emoji_file=\"$project_dir/.claude/agent-emojis.json\"; global_emoji_file=\"$HOME/.claude/agent-emojis.json\"; if [ -f \"$project_emoji_file\" ]; then emoji_file=\"$project_emoji_file\"; elif [ -f \"$global_emoji_file\" ]; then emoji_file=\"$global_emoji_file\"; else emoji_file=\"\"; fi; if [ -n \"$emoji_file\" ]; then icon=$(jq -r --arg a \"$agent\" \".[\\$a] // \\\"🤖\\\"\" \"$emoji_file\"); else icon=\"🤖\"; fi; if [ -n \"$branch\" ]; then loc=\"${ESC}[94m${rel}${ESC}[0m ${ESC}[36m(${branch})${ESC}[0m\"; else loc=\"${ESC}[94m${rel}${ESC}[0m\"; fi; printf \"${ESC}[38;5;225m%s${ESC}[0m ${ESC}[2m|${ESC}[0m %s ${ESC}[2m|${ESC}[0m ${ESC}[38;5;222mctx: %s%% (%s)${ESC}[0m ${ESC}[2m|${ESC}[0m ${ESC}[38;5;217m\\$%s${ESC}[0m ${ESC}[2m|${ESC}[0m %s ${ESC}[97m%s${ESC}[0m\\n\" \"$model\" \"$loc\" \"$ctx\" \"$ctx_size\" \"$cost\" \"$icon\" \"$agent\"'"
-  }
+  },
+  "autoDreamEnabled": true,
+  "advisorModel": "opus"
 }
