@@ -7,3 +7,6 @@ __pycache__/
 *-profile/
 # Memory files belong in profile repos, never in tamago engine repo
 agents/memory/
+.claude
+.opencode
+.tamago
