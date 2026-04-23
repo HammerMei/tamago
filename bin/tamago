@@ -1,0 +1,14 @@
+#!/bin/bash
+# tamago — AI agent setup tool
+# Thin wrapper: delegates all commands to setup.py.
+# Respects ASSISTANT_SETUP_REPO so non-default install paths work correctly.
+
+TAMAGO_ROOT="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
+
+if [ ! -f "$TAMAGO_ROOT/setup.py" ]; then
+    echo "error: tamago not found at $TAMAGO_ROOT" >&2
+    echo "       Set ASSISTANT_SETUP_REPO to your tamago path, or reinstall." >&2
+    exit 1
+fi
+
+exec python3 "$TAMAGO_ROOT/setup.py" "$@"

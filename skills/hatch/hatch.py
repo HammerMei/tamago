@@ -187,6 +187,7 @@ def create_profile(
     tone: str,
     user_address: str,
     gender: str,
+    emoji: str,
     profile_dir: Path,
     remote: str | None,
     tts: bool,
@@ -256,6 +257,8 @@ def create_profile(
         indent=2,
     ) + "\n"
 
+    agent_emojis_content = json.dumps({name: emoji}, indent=2) + "\n"
+
     birth_cert_content = build_birth_certificate(
         agent_name=name,
         display_name=display_name,
@@ -273,6 +276,7 @@ def create_profile(
         (profile_dir / "agents" / "memory" / name / "MEMORY.md", memory_content),
         (profile_dir / "agents" / "memory" / name / "birth_certificate.md", birth_cert_content),
         (profile_dir / "settings" / "claude" / "settings.json", claude_settings_content),
+        (profile_dir / "settings" / "claude" / "agent-emojis.json", agent_emojis_content),
         (profile_dir / "settings" / "opencode" / "opencode.json", opencode_settings_content),
         (profile_dir / ".gitignore", gitignore_content),
     ]
@@ -383,6 +387,10 @@ def parse_args() -> argparse.Namespace:
         help="Git remote URL to set as origin (optional)",
     )
     p.add_argument(
+        "--emoji", default="🤖",
+        help="Agent emoji for status line display (default: 🤖)",
+    )
+    p.add_argument(
         "--tts", action="store_true",
         help="Enable TTS skill instructions in the persona",
     )
@@ -460,6 +468,7 @@ def main() -> int:
             tone=args.tone,
             user_address=args.user_address,
             gender=args.gender,
+            emoji=args.emoji,
             profile_dir=profile_dir,
             remote=args.remote,
             tts=args.tts,

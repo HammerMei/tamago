@@ -12,35 +12,30 @@
 #
 # Profile repo discovery (priority order):
 #   1. PROFILE_REPO env var
-#   2. PROFILE_REPO= line in $REPO/local.conf  (written by setup.py install --profile)
-#   3. Fall back to $REPO itself (legacy single-repo mode)
+#   2. PROFILE_REPO= line in $PWD/.tamago/tamago.conf  (written by setup.py install)
+#   If neither is found the project has no tamago agent — exit silently.
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 MEMORY_PATH="agents/memory"
 
 # Resolve PROFILE_REPO and MEMORY_SYNC.
-# Priority: env var → project-scoped .tamago/tamago.conf → global local.conf → fallback
+# Priority: env var → project-scoped .tamago/tamago.conf
 # Hooks run with CWD = project dir, so $PWD/.tamago/tamago.conf is project-specific.
+# Absence of tamago.conf means this is not a tamago project — exit silently.
 PROJECT_CONF="$PWD/.tamago/tamago.conf"
 if [ -f "$PROJECT_CONF" ]; then
   [ -z "$PROFILE_REPO" ] && \
     PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
   [ -z "$MEMORY_SYNC" ] && \
     MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
-elif [ -f "$REPO/local.conf" ]; then
-  [ -z "$PROFILE_REPO" ] && \
-    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
-  [ -z "$MEMORY_SYNC" ] && \
-    MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$REPO/local.conf" 2>/dev/null | cut -d= -f2-)
 fi
-# No profile configured — skip entirely to avoid writing memory into the tamago engine repo.
-# (Legacy single-repo mode is no longer supported; configure PROFILE_REPO to enable sync.)
+# No profile configured — not a tamago project, skip silently.
 if [ -z "$PROFILE_REPO" ]; then
     exit 0
 fi
 MEMORY_REPO="$PROFILE_REPO"
 
-# Sync disabled — env var (LAOMEI_MEMORY_SYNC=0) or local.conf (MEMORY_SYNC=0)
+# Sync disabled — env var (LAOMEI_MEMORY_SYNC=0) or tamago.conf (MEMORY_SYNC=0)
 if [ "${LAOMEI_MEMORY_SYNC:-1}" = "0" ] || [ "${MEMORY_SYNC:-1}" = "0" ]; then
     exit 0
 fi
@@ -107,7 +102,7 @@ case "$1" in
   --pull)
     # Skip if no remote is configured
     git -C "$MEMORY_REPO" remote get-url origin &>/dev/null 2>&1 || exit 0
-    # Pull latest memory; surface warning to Claude context on failure
+    # Pull latest memory; surface warning to both Claude context and CLI on failure
     if ! (cd "$MEMORY_REPO" && timeout 5 git pull --rebase --quiet) 2>/dev/null; then
       echo "Memory sync warning: git pull failed — you may be out of sync with other 分身. Consider running 'git pull --rebase' in $MEMORY_REPO manually."
     fi

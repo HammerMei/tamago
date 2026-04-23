@@ -11,7 +11,9 @@ install [--source <tamago>] [--profile <profile_repo>]
     Symlink skills, agents, settings, and memory into the current project
     directory (.claude/, .opencode/).  When --profile is given, agent/persona
     files come from the profile repo and PROFILE_REPO is recorded in
-    <tamago>/local.conf so memory-sync.sh knows where to do git operations.
+    <project>/.tamago/tamago.conf so memory-sync.sh knows where to do git
+    operations.  A project without tamago.conf is treated as a non-tamago
+    project — memory-sync skips it silently.
 
 uninstall [--source <tamago>] [--profile <profile_repo>]
     Reverse of install — remove all symlinks created by install.
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -145,9 +148,10 @@ def setup_gitignore(operation: Operation, project_root: Path):
 # ---------------------------------------------------------------------------
 #
 # Config is stored in <project_dir>/.tamago/tamago.conf (project-scoped) so
-# multiple projects can each use a different profile without overwriting each
-# other.  tamago's global local.conf is also written as a convenience cache
-# for memory-sync.sh (which may not have easy access to the project dir).
+# multiple projects can each use a different profile without interfering with
+# each other.  Presence of tamago.conf is the canonical signal that a project
+# has a tamago agent installed — memory-sync.sh exits 0 silently when it is
+# absent.  There is no global local.conf fallback.
 
 PROJECT_CONF_NAME = "tamago.conf"  # lives inside <project_dir>/.tamago/
 
@@ -162,40 +166,32 @@ def _write_conf_file(path: Path, lines: list[str]) -> None:
     print(f"updated {path}")
 
 
-def write_local_conf(
-    source_root: Path,
+def write_project_conf(
     profile_root: Path | None,
     project_root: Path | None = None,
     memory_sync: bool = True,
+    tts_enabled: bool = True,
 ):
-    """Write (or remove) project-scoped tamago.conf and tamago's global local.conf."""
-    # ── Project-scoped config (.tamago/tamago.conf) ──────────────────────────
-    if project_root is not None:
-        project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
-        if profile_root is None:
-            if project_conf.exists():
-                project_conf.unlink()
-                print(f"removed {project_conf}")
-        else:
-            lines = [f"PROFILE_REPO={profile_root.resolve()}"]
-            if not memory_sync:
-                lines.append("MEMORY_SYNC=0")
-            _write_conf_file(project_conf, lines)
+    """Write (or remove) the project-scoped .tamago/tamago.conf.
 
-    # ── Global cache (tamago/local.conf) — used by memory-sync.sh ────────────
-    local_conf = source_root / "local.conf"
-    if profile_root is None:
-        if local_conf.exists():
-            local_conf.unlink()
-            print(f"removed {local_conf}")
+    Presence of this file is the canonical signal that a project has a tamago
+    agent installed.  memory-sync.sh exits silently when it is absent — there
+    is no global local.conf fallback.
+    """
+    if project_root is None:
         return
-
+    project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+    if profile_root is None:
+        if project_conf.exists():
+            project_conf.unlink()
+            print(f"removed {project_conf}")
+        return
     lines = [f"PROFILE_REPO={profile_root.resolve()}"]
-    if project_root is not None:
-        lines.append(f"PROJECT_DIR={project_root.resolve()}")
     if not memory_sync:
         lines.append("MEMORY_SYNC=0")
-    _write_conf_file(local_conf, lines)
+    if not tts_enabled:
+        lines.append("TTS_ENABLED=0")
+    _write_conf_file(project_conf, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -208,19 +204,26 @@ def setup_settings(
     project_root: Path,
     profile_root: Path | None = None,
 ):
-    # When a profile is given, the project-level settings come from the profile
-    # (which contains the agent name).  Otherwise fall back to tamago's common
-    # settings (no agent name — suitable for generic / multi-persona projects).
-    settings_source = profile_root if profile_root else source_root
-    claude_setting_file = settings_source / "settings" / "claude" / "settings.json"
-    opencode_setting_file = settings_source / "settings" / "opencode" / "opencode.json"
+    if profile_root:
+        # Profile case: symlink ALL *.json files from the profile's settings dirs
+        # so profiles can ship any per-profile config (e.g. agent-emojis.json)
+        # without tamago needing to know about them ahead of time.
+        claude_dir = profile_root / "settings" / "claude"
+        opencode_dir = profile_root / "settings" / "opencode"
+        claude_files = sorted(claude_dir.glob("*.json")) if claude_dir.is_dir() else []
+        opencode_files = sorted(opencode_dir.glob("*.json")) if opencode_dir.is_dir() else []
+    else:
+        # No profile: only the canonical settings.json from tamago global
+        # (no agent name — suitable for generic / multi-persona projects).
+        claude_files = [source_root / "settings" / "claude" / "settings.json"]
+        opencode_files = [source_root / "settings" / "opencode" / "opencode.json"]
 
     if operation == Operation.INSTALL:
-        symlink_paths([claude_setting_file], project_root / ".claude")
-        symlink_paths([opencode_setting_file], project_root / ".opencode")
+        symlink_paths(claude_files, project_root / ".claude")
+        symlink_paths(opencode_files, project_root / ".opencode")
     elif operation == Operation.UNINSTALL:
-        unlink_paths([claude_setting_file], project_root / ".claude")
-        unlink_paths([opencode_setting_file], project_root / ".opencode")
+        unlink_paths(claude_files, project_root / ".claude")
+        unlink_paths(opencode_files, project_root / ".opencode")
 
 
 def setup_global_settings(operation: Operation, source_root: Path):
@@ -249,6 +252,7 @@ def _merge_agent(
     profile_root: Path,
     persona_file: Path,
     target_dir: Path,
+    tts_enabled: bool = True,
 ) -> None:
     """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md."""
     # agent_name: strip the ".persona" suffix  (hammer.mei.persona.md → hammer.mei)
@@ -290,6 +294,12 @@ def _merge_agent(
         f"-->\n\n"
     )
 
+    if not tts_enabled:
+        # Strip ## TTS section from persona body (## TTS up to next ## heading or end)
+        body = re.sub(r"\n## TTS\n.*?(?=\n## |\Z)", "", body, flags=re.DOTALL)
+        # Remove text-to-speech from skills list in frontmatter
+        frontmatter = re.sub(r"^(\s*-\s*text-to-speech\s*\n)", "", frontmatter, flags=re.MULTILINE)
+
     merged = frontmatter + header + base_content + "\n\n---\n\n" + body
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -318,6 +328,7 @@ def setup_agents(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
+    tts_enabled: bool = True,
 ):
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
@@ -353,8 +364,8 @@ def setup_agents(
 
             for persona_file in sorted((profile_root / "agents").iterdir()):
                 if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
-                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root)
-                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root)
+                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root, tts_enabled)
+                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root, tts_enabled)
 
         # 3. Memory dirs from profile (or tamago fallback)
         if profile_root and (profile_root / "agents" / "memory").is_dir():
@@ -497,6 +508,20 @@ def setup_shell_env(operation: Operation, source_root: Path):
 # Top-level orchestrators
 # ---------------------------------------------------------------------------
 
+def pull_repo(path: Path, label: str) -> None:
+    """git pull --rebase on a repo; warn on failure, never block the install."""
+    if not (path / ".git").exists():
+        return
+    result = subprocess.run(
+        ["git", "-C", str(path), "pull", "--rebase", "--quiet"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"warning git pull failed in {label}: {result.stderr.strip()}", file=sys.stderr)
+    else:
+        print(f"pulled  {label}")
+
+
 def run_health_check(source_root: Path, project_root: Path) -> None:
     """Run health-check.sh after install to surface any environment issues."""
     health_check = source_root / "scripts" / "health-check.sh"
@@ -509,6 +534,51 @@ def run_health_check(source_root: Path, project_root: Path) -> None:
         ["bash", str(health_check), "--project", str(project_root)],
         check=False,
     )
+
+
+def setup_local_bin(operation: Operation, source_root: Path) -> None:
+    """Symlink the tamago CLI wrapper into ~/.local/bin and ensure it is on PATH."""
+    local_bin = Path("~/.local/bin").expanduser()
+    tamago_bin = source_root / "bin" / "tamago"
+    target = local_bin / "tamago"
+
+    if operation == Operation.INSTALL:
+        if not tamago_bin.exists():
+            raise Exception(f"tamago bin script not found: {tamago_bin}")
+
+        local_bin.mkdir(parents=True, exist_ok=True)
+
+        if target.is_symlink():
+            if target.resolve() == tamago_bin.resolve():
+                print(f"exists  {target} -> {tamago_bin}")
+            else:
+                target.unlink()
+                target.symlink_to(tamago_bin)
+                print(f"linked  {target} -> {tamago_bin}")
+        elif target.exists():
+            raise Exception(f"skip    {target} (already exists and is not a symlink — remove it manually)")
+        else:
+            target.symlink_to(tamago_bin)
+            print(f"linked  {target} -> {tamago_bin}")
+
+        # Add ~/.local/bin to PATH in ~/.zshrc if not already present
+        zshrc = Path("~/.zshrc").expanduser()
+        path_line = 'export PATH="$HOME/.local/bin:$PATH"'
+        path_marker = ".local/bin"
+        lines = zshrc.read_text().splitlines() if zshrc.exists() else []
+        if any(path_marker in l for l in lines):
+            print(f"exists  {path_marker} in ~/.zshrc PATH")
+        else:
+            with open(zshrc, "a") as f:
+                f.write(f"\n# tamago CLI\n{path_line}\n")
+            print(f"added   {path_marker} to ~/.zshrc PATH  (run: source ~/.zshrc)")
+
+    elif operation == Operation.UNINSTALL:
+        if target.is_symlink():
+            target.unlink()
+            print(f"removed {target}")
+        else:
+            print(f"skip    {target} not found")
 
 
 def setup_git_hooks(operation: Operation, source_root: Path) -> None:
@@ -538,6 +608,7 @@ def setup_global(operation: Operation, source_root: Path) -> int:
         lambda: setup_global_settings(operation, source_root),
         lambda: setup_shell_env(operation, source_root),
         lambda: setup_git_hooks(operation, source_root),
+        lambda: setup_local_bin(operation, source_root),
     ):
         try:
             step()
@@ -554,6 +625,7 @@ def setup(
     project_root: Path,
     profile_root: Path | None = None,
     memory_sync: bool = True,
+    tts_enabled: bool = True,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
@@ -575,15 +647,15 @@ def setup(
 
         setup_gitignore(operation, project_root)
         setup_skills(operation, source_root, project_root, profile_root)
-        setup_agents(operation, source_root, project_root, profile_root)
+        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled)
         setup_settings(operation, source_root, project_root, profile_root)
 
-        # Record (or remove) PROFILE_REPO + PROJECT_DIR + MEMORY_SYNC in local.conf
+        # Record (or remove) PROFILE_REPO + MEMORY_SYNC in project-scoped tamago.conf
         if operation == Operation.INSTALL:
-            write_local_conf(source_root, profile_root, project_root, memory_sync)
+            write_project_conf(profile_root, project_root, memory_sync, tts_enabled)
             run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
-            write_local_conf(source_root, None)
+            write_project_conf(None, project_root)
 
         return 0
     except Exception as e:
@@ -721,7 +793,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_memory_sync",
         action="store_true",
         default=False,
-        help="write MEMORY_SYNC=0 to local.conf — disables git-based memory sync",
+        help="write MEMORY_SYNC=0 to tamago.conf — disables git-based memory sync",
+    )
+
+    profile_parser.add_argument(
+        "--no-tts",
+        dest="no_tts",
+        action="store_true",
+        default=False,
+        help="disable TTS in generated agent files — useful for RC/headless deployments",
     )
 
     parser = argparse.ArgumentParser(
@@ -756,6 +836,19 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[source_parser, profile_parser],
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="run health check for the current (or specified) project",
+        parents=[source_parser],
+    )
+    doctor_parser.add_argument(
+        "--project",
+        dest="project",
+        default=None,
+        metavar="PATH",
+        help="project directory to check (default: current working directory)",
+    )
+
     return parser
 
 
@@ -773,6 +866,14 @@ def main() -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
+
+    if args.command in ("install", "install-global"):
+        pull_repo(source_root, "tamago")
+
+    if args.command == "doctor":
+        project = Path(getattr(args, "project", None) or Path.cwd()).expanduser().resolve()
+        run_health_check(source_root, project)
+        return 0
 
     if args.command == "install-global":
         return setup_global(Operation.INSTALL, source_root)
@@ -792,24 +893,27 @@ def main() -> int:
         print(e, file=sys.stderr)
         return 1
 
+    if args.command == Operation.INSTALL.value and profile_root is not None:
+        pull_repo(profile_root, "profile")
+
     # Uninstall fallback: if no profile flag given, read PROFILE_REPO from the
     # project-scoped .tamago/tamago.conf — correct even with multiple projects.
     if profile_root is None and args.command == Operation.UNINSTALL.value:
         project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
-        fallback_conf = project_conf if project_conf.exists() else source_root / "local.conf"
-        if fallback_conf.exists():
-            for line in fallback_conf.read_text().splitlines():
+        if project_conf.exists():
+            for line in project_conf.read_text().splitlines():
                 if line.startswith("PROFILE_REPO="):
                     candidate = Path(line.split("=", 1)[1].strip())
                     if candidate.is_dir():
                         profile_root = candidate
-                        print(f"info    using PROFILE_REPO from {fallback_conf.name}: {profile_root}")
+                        print(f"info    using PROFILE_REPO from tamago.conf: {profile_root}")
                     break
 
     for op in Operation:
         if args.command == op.value:
             memory_sync = not getattr(args, "no_memory_sync", False)
-            return setup(op, source_root, project_root, profile_root, memory_sync)
+            tts_enabled = not getattr(args, "no_tts", False)
+            return setup(op, source_root, project_root, profile_root, memory_sync, tts_enabled)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
