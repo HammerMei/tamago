@@ -22,10 +22,16 @@ uninstall [--source <tamago>] [--profile <profile_repo>]
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tomllib
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from collections.abc import Callable
 from enum import Enum
@@ -45,6 +51,20 @@ DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent
 # is actually installed here (the fallback already covers it).
 CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
 GITIGNORE_ENTRIES = (".claude", ".opencode", ".tamago")
+
+# Default agent name used when no profile settings.json names one.
+# Single definition so it's easy to spot if tamago ever becomes multi-persona generic.
+DEFAULT_AGENT_NAME = "hammer.mei"
+
+# Cache root for skill repos cloned from git URLs.
+# Uses SHA-256[:16] of the raw URL as the dir name — no URL normalization:
+# https://x.git and https://x hash to different directories.
+DEFAULT_CACHE_ROOT = Path("~/.tamago/repo-cache").expanduser()
+
+# Global project registry — JSON file tracking all tamago-installed projects.
+# Format: {"projects": [{"path": "/abs/path"}, ...]}
+# Extensible: future entries can add "last_install", "tamago_version", etc.
+KNOWN_PROJECTS_FILE = Path("~/.tamago/known-projects.json").expanduser()
 
 
 # ---------------------------------------------------------------------------
@@ -154,9 +174,235 @@ def setup_gitignore(operation: Operation, project_root: Path):
 # absent.  There is no global local.conf fallback.
 
 PROJECT_CONF_NAME = "tamago.conf"  # lives inside <project_dir>/.tamago/
+MACHINE_TOML_NAME = "machine.toml"  # machine-local install state (Slice E)
 
 
 def _write_conf_file(path: Path, lines: list[str]) -> None:
+    content = "\n".join(lines) + "\n"
+    if path.exists() and path.read_text() == content:
+        print(f"exists  {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    print(f"updated {path}")
+
+
+# ---------------------------------------------------------------------------
+# TOML config model (Phase 1 / Slice A)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProfileEntry:
+    name: str | None = None
+    repo: str | None = None
+
+
+@dataclass
+class AgentEntry:
+    name: str
+    source: str = "tamago"
+    scope: str = "project"
+    tts: bool = True
+    memory: bool = True
+
+
+@dataclass
+class SkillEntry:
+    name: str
+    source: str = "tamago"
+    scope: str = "global"
+    path: str | None = None
+
+
+@dataclass
+class TamagoConf:
+    profiles: list[ProfileEntry] = dataclass_field(default_factory=list)
+    agents: list[AgentEntry] = dataclass_field(default_factory=list)
+    skills: list[SkillEntry] = dataclass_field(default_factory=list)
+    memory_sync: bool = True
+
+
+@dataclass
+class MachineToml:
+    """Machine-local install-time state.  Written by install_from_conf, read by uninstall.
+
+    profiles:    agent-name → absolute path of resolved profile root
+    skill_cache: skill-name → absolute path of its skill repo cache dir
+    """
+    profiles: dict[str, str] = dataclass_field(default_factory=dict)
+    skill_cache: dict[str, str] = dataclass_field(default_factory=dict)
+
+
+def load_tamago_conf(path: Path) -> "TamagoConf | None":
+    """Parse a *TOML-format* tamago.conf and return a TamagoConf, or None on error.
+
+    ⚠️  This parser expects valid TOML.  The legacy KEY=VALUE file written by
+    write_project_conf (for backward-compat with memory-sync.sh) is NOT valid TOML
+    and will return None here.  load_tamago_conf is intended for a future TOML-format
+    config (Slice C / install_from_conf) — it is additive groundwork, not a reader
+    for the existing tamago.conf format.
+    """
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+
+        profiles = [
+            ProfileEntry(name=p.get("name"), repo=p.get("repo"))
+            for p in raw.get("profiles", [])
+        ]
+        agents = [
+            AgentEntry(
+                name=a["name"],
+                source=a.get("source", "tamago"),
+                scope=a.get("scope", "project"),
+                tts=a.get("tts", True),
+                memory=a.get("memory", True),
+            )
+            for a in raw.get("agents", [])
+            if "name" in a
+        ]
+        skills = [
+            SkillEntry(
+                name=s["name"],
+                source=s.get("source", "tamago"),
+                scope=s.get("scope", "global"),
+                path=s.get("path"),
+            )
+            for s in raw.get("skills", [])
+            if "name" in s
+        ]
+        settings_block = raw.get("settings", {})
+        if not isinstance(settings_block, dict):
+            return None
+        raw_sync = settings_block.get("memory_sync", True)
+        if not isinstance(raw_sync, bool):
+            return None
+        return TamagoConf(
+            profiles=profiles,
+            agents=agents,
+            skills=skills,
+            memory_sync=raw_sync,
+        )
+    except (OSError, tomllib.TOMLDecodeError, TypeError, AttributeError, KeyError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# machine.toml helpers (Slice E)
+# ---------------------------------------------------------------------------
+
+def _toml_string(s: str) -> str:
+    """Encode s as a TOML basic string (double-quoted, spec-compliant escaping).
+
+    Escapes backslash, double-quote, and the C0 control characters that TOML
+    requires to be escaped in basic strings (U+0000–U+001F).
+    """
+    # Backslash must be escaped first to avoid double-escaping subsequent replacements.
+    s = s.replace("\\", "\\\\")
+    s = s.replace('"', '\\"')
+    s = s.replace("\n", "\\n")
+    s = s.replace("\r", "\\r")
+    s = s.replace("\t", "\\t")
+    # Remaining C0 controls (U+0000–U+001F, excluding the three above)
+    s = "".join(
+        f"\\u{ord(c):04X}" if (ord(c) < 0x20 and c not in "\n\r\t") else c
+        for c in s
+    )
+    return '"' + s + '"'
+
+
+def write_machine_toml(path: Path, data: MachineToml) -> None:
+    """Write .tamago/machine.toml — machine-local install-time state.
+
+    Creates parent dirs if needed.  Skips the write when content is unchanged
+    (idempotent).  The file is gitignored; read by load_machine_toml on uninstall.
+    """
+    lines = ["# .tamago/machine.toml — auto-generated by tamago install, do not edit\n"]
+    if data.profiles:
+        lines.append("\n[profiles]\n")
+        for name, resolved in data.profiles.items():
+            lines.append(f"{_toml_string(name)} = {_toml_string(resolved)}\n")
+    if data.skill_cache:
+        lines.append("\n[skill_cache]\n")
+        for name, cache_path in data.skill_cache.items():
+            lines.append(f"{_toml_string(name)} = {_toml_string(cache_path)}\n")
+    content = "".join(lines)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_text() == content:
+        print(f"exists  {path}")
+        return
+    path.write_text(content)
+    print(f"updated {path}")
+
+
+def load_machine_toml(path: Path) -> "MachineToml | None":
+    """Read .tamago/machine.toml; return None if missing or unparseable."""
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+        profiles = {str(k): str(v) for k, v in raw.get("profiles", {}).items()}
+        skill_cache = {str(k): str(v) for k, v in raw.get("skill_cache", {}).items()}
+        return MachineToml(profiles=profiles, skill_cache=skill_cache)
+    except (OSError, tomllib.TOMLDecodeError, TypeError, AttributeError, ValueError):
+        return None
+
+
+def _detect_agent_name(profile_root: Path | None) -> str:
+    """Read agent name from profile's settings.json, or fall back to DEFAULT_AGENT_NAME."""
+    if profile_root is None:
+        return DEFAULT_AGENT_NAME
+    settings_file = profile_root / "settings" / "claude" / "settings.json"
+    if not settings_file.exists():
+        return DEFAULT_AGENT_NAME
+    try:
+        import json
+        data = json.loads(settings_file.read_text())
+        return data.get("agent", DEFAULT_AGENT_NAME)
+    except (OSError, ValueError):
+        return DEFAULT_AGENT_NAME
+
+
+MACHINE_ENV_NAME = "machine.env"  # lives inside <project_dir>/.tamago/
+
+
+def _shell_quote_value(v: str) -> str:
+    """Wrap a string value in single quotes for safe shell sourcing.
+
+    Escapes any embedded single quotes using the 'x'"'"'y' idiom so the result
+    is always valid shell regardless of spaces, $, backticks, or other metacharacters.
+    """
+    return "'" + v.replace("'", "'\\''") + "'"
+
+
+def write_machine_env(
+    path: Path,
+    profile_repo: Path | None,
+    agent_name: str,
+    memory_sync: bool = True,
+    tts_enabled: bool = True,
+) -> None:
+    """Write (or remove) .tamago/machine.env — a shell-sourceable KEY=VALUE bridge.
+
+    This file lets bash scripts (memory-sync.sh) read tamago config without a TOML
+    parser.  Values containing paths or user-supplied strings are single-quoted so
+    sourcing the file is safe even when they contain spaces or shell metacharacters.
+    The file is gitignored (machine-local) and regenerated on every install.
+    """
+    if profile_repo is None:
+        if path.exists():
+            path.unlink()
+            print(f"removed {path}")
+        return
+    lines = [
+        f"PROFILE_REPO={_shell_quote_value(str(profile_repo.resolve()))}",
+        f"AGENT_NAME={_shell_quote_value(agent_name)}",
+        f"MEMORY_SYNC={1 if memory_sync else 0}",
+        f"TTS_ENABLED={1 if tts_enabled else 0}",
+    ]
     content = "\n".join(lines) + "\n"
     if path.exists() and path.read_text() == content:
         print(f"exists  {path}")
@@ -181,10 +427,12 @@ def write_project_conf(
     if project_root is None:
         return
     project_conf = project_root / ".tamago" / PROJECT_CONF_NAME
+    machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
     if profile_root is None:
         if project_conf.exists():
             project_conf.unlink()
             print(f"removed {project_conf}")
+        write_machine_env(machine_env, None, "")
         return
     lines = [f"PROFILE_REPO={profile_root.resolve()}"]
     if not memory_sync:
@@ -192,6 +440,8 @@ def write_project_conf(
     if not tts_enabled:
         lines.append("TTS_ENABLED=0")
     _write_conf_file(project_conf, lines)
+    agent_name = _detect_agent_name(profile_root)
+    write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -226,18 +476,319 @@ def setup_settings(
         unlink_paths(opencode_files, project_root / ".opencode")
 
 
-def setup_global_settings(operation: Operation, source_root: Path):
-    """Symlink global Claude / OpenCode settings to ~/.claude and ~/.opencode."""
+def _symlink_opencode_global(operation: Operation, source_root: Path) -> None:
+    """Symlink global OpenCode settings to ~/.opencode."""
     home = Path.home()
-    claude_setting_file = source_root / "settings" / "claude" / "settings.json"
     opencode_setting_file = source_root / "settings" / "opencode" / "opencode.json"
-
     if operation == Operation.INSTALL:
-        symlink_paths([claude_setting_file], home / ".claude")
         symlink_paths([opencode_setting_file], home / ".opencode")
     elif operation == Operation.UNINSTALL:
-        unlink_paths([claude_setting_file], home / ".claude")
         unlink_paths([opencode_setting_file], home / ".opencode")
+
+
+# ---------------------------------------------------------------------------
+# Global settings patch/merge (Slice B)
+# ---------------------------------------------------------------------------
+# Rather than symlinking ~/.claude/settings.json to tamago's source file, we
+# *patch* the real ~/.claude/settings.json so user-owned keys (advisorModel,
+# nagori hooks, etc.) survive install and uninstall unchanged.
+#
+# Lifecycle:
+#   install-global  → patch_global_settings (INSTALL)  → writes ~/.claude/.tamago-manifest.json
+#   uninstall-global → patch_global_settings (UNINSTALL) → reads manifest, removes entries, deletes manifest
+#
+# Manifest path: ~/.claude/.tamago-manifest.json  (sidecar to the file being patched)
+# OpenCode:      still symlinked (no equivalent patching needed — file is ours end-to-end)
+
+
+def _read_tamago_source_hooks(source_settings: dict) -> dict[str, list[str]]:
+    """Extract hook commands from tamago source settings, keyed by event name.
+
+    Only reads from default matchers (those with no 'matcher' key or matcher == '').
+    Returns a dict like {"SessionStart": ["cmd1"], "Stop": ["cmd2"]}.
+    """
+    result: dict[str, list[str]] = {}
+    for event, matchers in source_settings.get("hooks", {}).items():
+        cmds: list[str] = []
+        for matcher in matchers:
+            if matcher.get("matcher", "") == "":
+                for h in matcher.get("hooks", []):
+                    if h.get("type") == "command" and "command" in h:
+                        cmds.append(h["command"])
+        if cmds:
+            result[event] = cmds
+    return result
+
+
+def _read_tamago_source_perms(source_settings: dict) -> list[str]:
+    """Extract permissions.allow list from tamago source settings."""
+    return source_settings.get("permissions", {}).get("allow", [])
+
+
+def patch_settings(
+    path: Path,
+    hook_commands: dict[str, list[str]],
+    perms: list[str],
+    status_line: dict | None,
+    manifest_path: Path,
+) -> None:
+    """Patch a Claude Code settings.json with tamago entries (hooks, perms, statusLine).
+
+    Idempotent: entries already present are skipped (dedup by exact command string
+    for hooks, set membership for perms).
+
+    Migration: if path is a symlink, it is converted to a regular file first so
+    subsequent user edits (or tamago source changes) are independent.
+
+    Sidecar: a JSON manifest at manifest_path records exactly what was injected;
+    unpatch_settings uses it to remove only tamago's entries, leaving user additions
+    untouched.
+    """
+    import json
+
+    # Handle symlink migration: read content, unlink, write as real file.
+    # Track whether we migrated so we can pre-populate the manifest below.
+    migrated_from_symlink = False
+    if path.is_symlink():
+        try:
+            content = path.read_text()
+        except OSError:
+            # Dangling symlink — target is gone.  Unlink and start fresh.
+            path.unlink()
+            content = "{}"
+        else:
+            path.unlink()
+            path.write_text(content)
+        migrated_from_symlink = True
+        print(f"migrated {path} (symlink → real file)")
+
+    # Load existing settings or start fresh
+    current: dict = json.loads(path.read_text()) if path.exists() else {}
+
+    changed = False
+
+    # Load existing manifest (cumulative — re-installs must not wipe prior injection record)
+    _empty_manifest: dict = {
+        "injected_perms": [],
+        "injected_hooks": {},
+        "injected_status_line": False,
+    }
+    if manifest_path.exists():
+        try:
+            manifest: dict = json.loads(manifest_path.read_text())
+            manifest.setdefault("injected_perms", [])
+            manifest.setdefault("injected_hooks", {})
+            manifest.setdefault("injected_status_line", False)
+        except (OSError, ValueError):
+            manifest = _empty_manifest
+    else:
+        manifest = _empty_manifest
+
+    # Symlink migration: claim ownership of tamago entries that were already in the
+    # file (because the file WAS tamago's own settings.json via symlink).  The normal
+    # dedup loop will skip them (already present), so we record them in the manifest
+    # here to ensure uninstall can remove them later.
+    if migrated_from_symlink:
+        already_perms = set(current.get("permissions", {}).get("allow", []))
+        for p in perms:
+            if p in already_perms and p not in manifest["injected_perms"]:
+                manifest["injected_perms"].append(p)
+        for event, commands in hook_commands.items():
+            already_cmds = {
+                h["command"]
+                for m in current.get("hooks", {}).get(event, [])
+                if m.get("matcher", "") == ""
+                for h in m.get("hooks", [])
+                if h.get("type") == "command" and "command" in h
+            }
+            for cmd in commands:
+                injected = manifest["injected_hooks"].setdefault(event, [])
+                if cmd in already_cmds and cmd not in injected:
+                    injected.append(cmd)
+        if status_line is not None and current.get("statusLine") == status_line:
+            manifest["injected_status_line"] = True
+
+    # 1. Permissions — set union (append new ones after existing, preserve order)
+    existing_perms: list = current.get("permissions", {}).get("allow", [])
+    existing_perm_set = set(existing_perms)
+    to_add = [p for p in perms if p not in existing_perm_set]
+    if to_add:
+        current.setdefault("permissions", {}).setdefault("allow", []).extend(to_add)
+        manifest["injected_perms"].extend(to_add)  # extend (not assign) — cumulative
+        changed = True
+
+    # 2. Hooks — add missing commands into the default (no-matcher) block
+    for event, commands in hook_commands.items():
+        event_matchers: list = current.get("hooks", {}).get(event, [])
+        default_block: dict | None = next(
+            (m for m in event_matchers if m.get("matcher", "") == ""),
+            None,
+        )
+        # Only count type=command entries for dedup (mirrors _read_tamago_source_hooks)
+        existing_cmds = {
+            h["command"]
+            for h in (default_block.get("hooks", []) if default_block else [])
+            if h.get("type") == "command" and "command" in h
+        }
+
+        to_inject = [cmd for cmd in commands if cmd not in existing_cmds]
+        if to_inject:
+            if default_block is None:
+                default_block = {"hooks": []}
+                current.setdefault("hooks", {}).setdefault(event, []).insert(0, default_block)
+            for cmd in to_inject:
+                default_block.setdefault("hooks", []).append({"type": "command", "command": cmd})
+            manifest["injected_hooks"].setdefault(event, []).extend(to_inject)
+            changed = True
+
+    # 3. statusLine — inject only if the key is absent
+    if status_line is not None and "statusLine" not in current:
+        current["statusLine"] = status_line
+        manifest["injected_status_line"] = True
+        changed = True
+
+    # Write settings back only if something changed (avoid spurious reformatting)
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current, indent=2) + "\n")
+        print(f"patched {path}")
+    else:
+        print(f"exists  {path}")
+
+    # Write sidecar manifest (always, to keep it current even on no-op runs)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"updated {manifest_path}")
+
+
+def unpatch_settings(path: Path, manifest_path: Path) -> None:
+    """Remove tamago-injected entries from a Claude Code settings.json.
+
+    Reads the sidecar manifest to know exactly what tamago added. Entries that
+    the user modified after injection are left in place (command string must match
+    exactly for removal to trigger — a modified command is treated as user-owned).
+    """
+    import json
+
+    if not manifest_path.exists():
+        print(f"skip    {manifest_path} not found — nothing to uninstall")
+        return
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        print(f"warn    {manifest_path} is corrupt — skipping uninstall to avoid data loss")
+        return
+
+    if not path.exists():
+        manifest_path.unlink(missing_ok=True)
+        print(f"removed {manifest_path}")
+        return
+
+    try:
+        current = json.loads(path.read_text())
+    except (OSError, ValueError):
+        print(f"warn    {path} is corrupt — cannot uninstall; remove {manifest_path} manually")
+        return
+
+    changed = False
+
+    # 1. Remove injected permissions (exact string match only)
+    injected_perms = set(manifest.get("injected_perms", []))
+    if injected_perms and "permissions" in current and "allow" in current["permissions"]:
+        new_perms = [p for p in current["permissions"]["allow"] if p not in injected_perms]
+        if new_perms != current["permissions"]["allow"]:
+            current["permissions"]["allow"] = new_perms
+            changed = True
+
+    # 2. Remove injected hook commands (exact command string match).
+    #    Drop empty default blocks and empty event keys so no residue is left behind.
+    for event, commands in manifest.get("injected_hooks", {}).items():
+        cmd_set = set(commands)
+        event_list = current.get("hooks", {}).get(event, [])
+        new_event_list = []
+        for matcher in event_list:
+            if matcher.get("matcher", "") != "":
+                new_event_list.append(matcher)
+                continue  # skip non-default matchers — tamago never touches them
+            hooks = matcher.get("hooks", [])
+            new_hooks = [h for h in hooks if h.get("command") not in cmd_set]
+            if new_hooks != hooks:
+                changed = True
+            if new_hooks:
+                matcher["hooks"] = new_hooks
+                new_event_list.append(matcher)
+            # else: block now empty — drop it entirely
+        if len(new_event_list) != len(event_list):
+            if new_event_list:
+                current["hooks"][event] = new_event_list
+            elif event in current.get("hooks", {}):
+                del current["hooks"][event]
+
+    # 3. Remove injected statusLine (only if we added it)
+    if manifest.get("injected_status_line") and "statusLine" in current:
+        del current["statusLine"]
+        changed = True
+
+    if changed:
+        path.write_text(json.dumps(current, indent=2) + "\n")
+        print(f"unpatched {path}")
+    else:
+        print(f"exists  {path} (no tamago entries to remove)")
+
+    manifest_path.unlink()
+    print(f"removed {manifest_path}")
+
+
+def patch_global_settings(operation: Operation, source_root: Path) -> None:
+    """Patch (or unpatch) ~/.claude/settings.json with tamago entries.
+
+    Reads tamago's source settings/claude/settings.json to determine what to inject.
+    Writes a sidecar manifest at ~/.claude/.tamago-manifest.json for clean uninstall.
+    """
+    import json
+
+    settings_path = Path("~/.claude/settings.json").expanduser()
+    manifest_path = Path("~/.claude/.tamago-manifest.json").expanduser()
+
+    if operation == Operation.INSTALL:
+        source_path = source_root / "settings" / "claude" / "settings.json"
+        if not source_path.exists():
+            print(f"warn    {source_path} not found — patching with empty config")
+        source_settings: dict = (
+            json.loads(source_path.read_text()) if source_path.exists() else {}
+        )
+        hook_commands = _read_tamago_source_hooks(source_settings)
+        perms = _read_tamago_source_perms(source_settings)
+        status_line = source_settings.get("statusLine")
+        patch_settings(settings_path, hook_commands, perms, status_line, manifest_path)
+    elif operation == Operation.UNINSTALL:
+        unpatch_settings(settings_path, manifest_path)
+
+
+def patch_opencode_global_settings(operation: Operation, source_root: Path) -> None:
+    """Patch (or unpatch) ~/.opencode/opencode.json with tamago entries.
+
+    Mirrors patch_global_settings() for OpenCode.  The key immediate benefit is
+    symlink migration: if ~/.opencode/opencode.json is currently a tamago symlink,
+    install converts it to a real file so user-added OpenCode config (model prefs,
+    provider settings, etc.) survives future 'tamago update' runs.
+
+    OpenCode hooks live in the TypeScript plugin (memory-bootstrap.ts) rather than
+    the JSON config, so no hooks or permissions are injected for now.  The sidecar
+    manifest at ~/.opencode/.tamago-manifest.json is still written so that uninstall
+    can cleanly remove tamago's footprint even when future slices start injecting
+    OpenCode-specific keys.
+    """
+    settings_path = Path("~/.opencode/opencode.json").expanduser()
+    manifest_path = Path("~/.opencode/.tamago-manifest.json").expanduser()
+
+    if operation == Operation.INSTALL:
+        # Nothing to inject into opencode.json yet — but patch_settings() handles
+        # symlink migration and manifest writing for us.
+        patch_settings(settings_path, {}, [], None, manifest_path)
+    elif operation == Operation.UNINSTALL:
+        unpatch_settings(settings_path, manifest_path)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +1073,142 @@ def pull_repo(path: Path, label: str) -> None:
         print(f"pulled  {label}")
 
 
+# ---------------------------------------------------------------------------
+# External skill repo helpers (Slice D)
+# ---------------------------------------------------------------------------
+
+def _skill_repo_cache_dir(url: str, cache_root: Path) -> Path:
+    """Compute a stable per-URL cache directory path.
+
+    Uses the first 16 hex chars of SHA-256(url) as the dir name.  The hash
+    is of the literal URL string — no normalization — so callers must use
+    the exact same URL string in every reference to the same repo.
+    """
+    key = hashlib.sha256(url.encode()).hexdigest()[:16]
+    return cache_root / key
+
+
+def _clone_or_reuse_skill_repo(url: str, cache_dir: Path) -> Path:
+    """Return cache_dir pointing to a valid git clone of url.
+
+    On cache miss: clones url into cache_dir and returns it.
+    On cache hit: prints 'cached' and returns immediately without pulling
+    (callers that want updates should call _pull_skill_repos separately).
+    Raises Exception if cache_dir exists but is not a git repo.
+    """
+    if cache_dir.is_dir() and (cache_dir / ".git").exists():
+        print(f"cached  {url}")
+        return cache_dir
+    if cache_dir.exists():
+        raise Exception(f"Cache path exists but is not a git repo: {cache_dir}")
+    print(f"cloning {url}")
+    print(f"     → {cache_dir}")
+    result = subprocess.run(
+        ["git", "clone", url, str(cache_dir)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise Exception(f"git clone failed for {url}:\n{result.stderr.strip()}")
+    return cache_dir
+
+
+def _resolve_external_skill_dir(skill: "SkillEntry", cache_root: Path) -> Path:
+    """Return the directory to symlink for an external (URL-sourced) skill.
+
+    Single-skill repos (no path): the cache dir itself.
+    Monorepos   (path set):      cache_dir / skill.path  (must exist).
+    """
+    cache_dir = _skill_repo_cache_dir(skill.source, cache_root)
+    repo_dir = _clone_or_reuse_skill_repo(skill.source, cache_dir)
+    if skill.path:
+        skill_dir = repo_dir / skill.path
+        if not skill_dir.is_dir():
+            raise Exception(f"Skill path not found in repo: {skill_dir}")
+        return skill_dir
+    return repo_dir
+
+
+def _pull_skill_repos(conf_skills: list["SkillEntry"], cache_root: Path) -> None:
+    """Pull (update) each unique URL-sourced skill repo once.
+
+    Deduplicates by URL so monorepos referenced by multiple skill entries
+    are only pulled once.  Skips repos not yet cloned — they'll be cloned
+    fresh when setup_external_skills runs.
+    """
+    seen: set[str] = set()
+    for skill in conf_skills:
+        url = skill.source
+        if url in ("tamago", "profile") or url in seen:
+            continue
+        seen.add(url)
+        cache_dir = _skill_repo_cache_dir(url, cache_root)
+        if cache_dir.is_dir() and (cache_dir / ".git").exists():
+            pull_repo(cache_dir, url)
+
+
+def setup_external_skills(
+    operation: Operation,
+    conf_skills: list["SkillEntry"],
+    project_root: Path,
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+) -> int:
+    """Symlink (or remove) external (URL-sourced) skills in project_root.
+
+    Processes only SkillEntry objects where source is a git URL (not
+    "tamago" or "profile").  Skills with scope="global" are warned and
+    skipped (global scope is not yet supported in this version).
+    Returns 0 on success, 1 if any skill fails to clone, resolve, or link.
+    """
+    errors = 0
+    for skill in conf_skills:
+        url = skill.source
+        if url in ("tamago", "profile"):
+            continue
+        if skill.scope == "global":
+            print(
+                f"warning skill '{skill.name}' scope=global is not yet supported "
+                f"in this version — skipping (use scope=\"project\" instead)",
+                file=sys.stderr,
+            )
+            continue
+
+        if operation == Operation.INSTALL:
+            try:
+                skill_dir = _resolve_external_skill_dir(skill, cache_root)
+                for skills_root in (
+                    project_root / ".claude" / "skills",
+                    project_root / ".opencode" / "skills",
+                ):
+                    target = skills_root / skill.name
+                    skills_root.mkdir(parents=True, exist_ok=True)
+                    if target.is_symlink():
+                        if target.resolve() == skill_dir.resolve():
+                            print(f"exists  {target} -> {skill_dir}")
+                            continue
+                        target.unlink()
+                    elif target.exists():
+                        raise Exception(
+                            f"{target} exists and is not a symlink — remove it manually"
+                        )
+                    target.symlink_to(skill_dir)
+                    print(f"linked  {target} -> {skill_dir}")
+            except Exception as e:
+                print(f"error   {e}", file=sys.stderr)
+                errors += 1
+
+        elif operation == Operation.UNINSTALL:
+            for skills_root in (
+                project_root / ".claude" / "skills",
+                project_root / ".opencode" / "skills",
+            ):
+                target = skills_root / skill.name
+                if target.is_symlink():
+                    target.unlink()
+                    print(f"removed {target}")
+
+    return 1 if errors else 0
+
+
 def run_health_check(source_root: Path, project_root: Path) -> None:
     """Run health-check.sh after install to surface any environment issues."""
     health_check = source_root / "scripts" / "health-check.sh"
@@ -599,13 +1286,14 @@ def setup_git_hooks(operation: Operation, source_root: Path) -> None:
 
 
 def setup_global(operation: Operation, source_root: Path) -> int:
-    """Home-level install: symlink to ~/.claude and ~/.opencode, update ~/.zshrc,
-    and install tamago's own git hooks.
+    """Home-level install: patch ~/.claude/settings.json, patch ~/.opencode/opencode.json,
+    update ~/.zshrc, and install tamago's own git hooks.
     Each step runs independently — one failure does not block the others."""
     errors: list[str] = []
 
     for step in (
-        lambda: setup_global_settings(operation, source_root),
+        lambda: patch_global_settings(operation, source_root),         # Claude: patch/merge
+        lambda: patch_opencode_global_settings(operation, source_root), # OpenCode: patch/merge
         lambda: setup_shell_env(operation, source_root),
         lambda: setup_git_hooks(operation, source_root),
         lambda: setup_local_bin(operation, source_root),
@@ -661,6 +1349,315 @@ def setup(
     except Exception as e:
         print(e, file=sys.stderr)
         return 1
+
+
+# ---------------------------------------------------------------------------
+# Project registry helpers (Slice F)
+# ---------------------------------------------------------------------------
+# Registry lives at ~/.tamago/known-projects.json
+# Format: {"projects": [{"path": "/abs/path"}, ...]}
+# The "projects" list is the stable key; each entry is an object so future
+# slices can add metadata (last_install, tamago_version, etc.) without a
+# format bump.
+
+def read_known_projects(registry_path: Path = KNOWN_PROJECTS_FILE) -> list[dict]:
+    """Return the raw project entries from the registry.
+
+    Each entry is a dict with at least a "path" key.  Returns [] if the file
+    is missing, empty, or unparseable — never raises.
+    """
+    if not registry_path.exists():
+        return []
+    try:
+        raw = json.loads(registry_path.read_text())
+        entries = raw.get("projects", [])
+        if not isinstance(entries, list):
+            return []
+        return [e for e in entries if isinstance(e, dict) and "path" in e]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+
+
+def _write_registry(registry_path: Path, entries: list[dict]) -> None:
+    """Overwrite the registry with a new entries list."""
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps({"projects": entries}, indent=2) + "\n")
+
+
+def add_project_to_registry(
+    project_root: Path,
+    registry_path: Path = KNOWN_PROJECTS_FILE,
+) -> None:
+    """Add project_root to the registry (idempotent — dedup by resolved path)."""
+    resolved = str(project_root.resolve())
+    entries = read_known_projects(registry_path)
+    if any(e.get("path") == resolved for e in entries):
+        return
+    entries.append({"path": resolved})
+    _write_registry(registry_path, entries)
+    print(f"registered {resolved}")
+
+
+def remove_project_from_registry(
+    project_root: Path,
+    registry_path: Path = KNOWN_PROJECTS_FILE,
+) -> None:
+    """Remove project_root from the registry (no-op if not present)."""
+    if not registry_path.exists():
+        return
+    resolved = str(project_root.resolve())
+    entries = read_known_projects(registry_path)
+    new_entries = [e for e in entries if e.get("path") != resolved]
+    if len(new_entries) == len(entries):
+        return  # wasn't registered
+    _write_registry(registry_path, new_entries)
+    print(f"unregistered {resolved}")
+
+
+# ---------------------------------------------------------------------------
+# Prune (Slice F)
+# ---------------------------------------------------------------------------
+
+def prune(
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+    registry_path: Path = KNOWN_PROJECTS_FILE,
+    dry_run: bool = False,
+) -> int:
+    """Remove skill cache dirs not referenced by any known tamago project.
+
+    Reads ~/.tamago/known-projects.json, loads each project's machine.toml,
+    collects all referenced cache dirs, then deletes any entries in cache_root
+    not in that set.  Stale registry entries (project dir gone) are cleaned up
+    automatically unless dry_run is True.
+
+    Returns 0 on success, 1 if any removal fails.
+    """
+    entries = read_known_projects(registry_path)
+
+    referenced: set[str] = set()
+    stale: list[dict] = []
+    # Pre-Slice-E projects: registered dir exists but has no machine.toml.
+    # We cannot know which cache dirs they reference, so we must not delete anything.
+    ambiguous: list[Path] = []
+
+    for entry in entries:
+        project_path = Path(entry["path"])
+        machine_toml = project_path / ".tamago" / MACHINE_TOML_NAME
+        data = load_machine_toml(machine_toml)
+        if data is None:
+            if not project_path.is_dir():
+                print(f"stale   {project_path} (dir gone — will clean registry)")
+                stale.append(entry)
+            else:
+                # Project exists but no machine.toml — pre-Slice-E install.
+                # Its cache usage is unknown; treat conservatively.
+                print(
+                    f"warn    {project_path} has no machine.toml "
+                    f"(run 'tamago install --config tamago.conf' to upgrade) — "
+                    f"skipping prune to avoid deleting caches it may still use"
+                )
+                ambiguous.append(project_path)
+            continue
+        for cache_path_str in data.skill_cache.values():
+            referenced.add(str(Path(cache_path_str).resolve()))
+
+    if ambiguous:
+        print(
+            f"info    prune aborted — {len(ambiguous)} project(s) with unknown cache usage. "
+            f"Re-install them with 'tamago install --config tamago.conf' then retry."
+        )
+        return 1
+
+    if not cache_root.is_dir():
+        print(f"info    cache root absent — nothing to prune: {cache_root}")
+    else:
+        errors = 0
+        pruned = 0
+        for entry_path in sorted(cache_root.iterdir()):
+            if not entry_path.is_dir():
+                continue
+            if str(entry_path.resolve()) not in referenced:
+                if dry_run:
+                    print(f"would   remove {entry_path}")
+                else:
+                    try:
+                        shutil.rmtree(entry_path)
+                        print(f"pruned  {entry_path}")
+                        pruned += 1
+                    except OSError as exc:
+                        print(f"error   could not remove {entry_path}: {exc}", file=sys.stderr)
+                        errors += 1
+        if not dry_run and pruned == 0 and errors == 0:
+            print("info    nothing to prune")
+        if errors:
+            return 1
+
+    # Clean stale entries from registry (skip in dry-run)
+    if stale and not dry_run:
+        active = [e for e in entries if e not in stale]
+        _write_registry(registry_path, active)
+        print(f"info    removed {len(stale)} stale registry entr{'y' if len(stale) == 1 else 'ies'}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# TOML-conf driven install (Slice C / D / E)
+# ---------------------------------------------------------------------------
+
+def _write_install_machine_toml(
+    path: Path,
+    conf: "TamagoConf",
+    profile_root: "Path | None",
+    cache_root: Path,
+) -> None:
+    """Build and write machine.toml from the resolved install state.
+
+    Called by install_from_conf AFTER setup() succeeds but BEFORE
+    setup_external_skills() so the profile path is always recorded
+    even if a URL-skill clone fails.
+    """
+    profiles: dict[str, str] = {}
+    if profile_root is not None and conf.profiles:
+        p = conf.profiles[0]
+        key = p.name or (_repo_name_from_url(p.repo) if p.repo else "default")
+        profiles[key] = str(profile_root.resolve())
+
+    skill_cache: dict[str, str] = {}
+    for skill in conf.skills:
+        if skill.source not in ("tamago", "profile"):
+            cache_dir = _skill_repo_cache_dir(skill.source, cache_root)
+            # Use resolve() so prune()'s set membership check (which also resolves)
+            # matches even when DEFAULT_CACHE_ROOT contains symlink components.
+            skill_cache[skill.name] = str(cache_dir.resolve())
+
+    write_machine_toml(path, MachineToml(profiles=profiles, skill_cache=skill_cache))
+
+
+def install_from_conf(
+    conf_path: Path,
+    operation: Operation,
+    source_root: Path,
+    project_root: Path,
+    pull_cached_skills: bool = False,
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+    registry_path: Path = KNOWN_PROJECTS_FILE,
+) -> int:
+    """Install/uninstall all agents and skills declared in a tamago.conf TOML file.
+
+    This is the v2 entry point — all deployment decisions (profile, tts, memory_sync,
+    scope) live in tamago.conf rather than CLI flags.
+
+    MVP limitations (Slice C/D/E):
+    - Only the first [[profiles]] entry is used; a second one raises an error.
+    - Per-agent scope (global vs project) is not yet honoured — all agents install
+      at project scope via the existing setup() orchestrator.
+    - tts is derived from the first profile-sourced agent entry; if multiple profile
+      agents have conflicting tts values, the first one wins for all of them.
+    - [[skills]] with scope=global are warned and skipped (Slice D limitation).
+
+    pull_cached_skills: when True, pull already-cached skill repos before installing
+      (used by 'tamago update'; False for plain 'tamago install').
+
+    machine.toml (Slice E):
+    - On INSTALL: written after setup() succeeds, recording resolved profile path and
+      skill cache dirs.  Written BEFORE setup_external_skills so the profile is always
+      recorded even if a URL-skill clone fails.
+    - On UNINSTALL: read first to recover the reliably-resolved profile path from the
+      previous install; falls back to conf.profiles re-resolution for pre-Slice-E
+      installs.  Deleted after uninstall completes.
+    """
+    conf = load_tamago_conf(conf_path)
+    if conf is None:
+        print(f"error   could not parse tamago.conf: {conf_path}", file=sys.stderr)
+        return 1
+
+    # Guard: spec says "only one [[profiles]] entry for now".
+    if len(conf.profiles) > 1:
+        print(
+            f"error   tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
+            f"only one is supported in this version",
+            file=sys.stderr,
+        )
+        return 1
+
+    machine_toml_path = project_root / ".tamago" / MACHINE_TOML_NAME
+
+    # For UNINSTALL: try machine.toml first — it has the path we resolved at install
+    # time, which is stable even if the user later edits tamago.conf.
+    profile_root: Path | None = None
+    if operation == Operation.UNINSTALL:
+        machine_data = load_machine_toml(machine_toml_path)
+        if machine_data is not None:
+            for path_str in machine_data.profiles.values():
+                candidate = Path(path_str)
+                if candidate.is_dir():
+                    profile_root = candidate
+                    print(f"info    using profile from machine.toml: {profile_root}")
+                    break
+
+    # Resolve profile from conf if not already found via machine.toml.
+    if profile_root is None and conf.profiles:
+        p = conf.profiles[0]
+        try:
+            profile_root = resolve_profile_root(
+                source_root,
+                profile_dir=None,
+                profile_repo=p.repo,
+                profile_name=p.name,
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
+
+    # Derive tts_enabled: first [[agents]] entry with source="profile" wins.
+    # tamago-built-in agents don't generate TTS sections regardless.
+    tts_enabled = True
+    for a in conf.agents:
+        if a.source == "profile":
+            tts_enabled = a.tts
+            break
+
+    # Pull latest repos on install (uninstall works from whatever is on disk).
+    if operation == Operation.INSTALL:
+        pull_repo(source_root, "tamago")
+        if profile_root is not None:
+            pull_repo(profile_root, "profile")
+        if pull_cached_skills:
+            _pull_skill_repos(conf.skills, cache_root)
+
+    rc = setup(
+        operation,
+        source_root,
+        project_root,
+        profile_root=profile_root,
+        memory_sync=conf.memory_sync,
+        tts_enabled=tts_enabled,
+    )
+    if rc != 0:
+        return rc
+
+    # Write machine.toml AFTER setup() succeeds so we only record a working install.
+    # Do it BEFORE setup_external_skills so the profile path is captured even if a
+    # URL-skill clone fails.
+    if operation == Operation.INSTALL:
+        _write_install_machine_toml(machine_toml_path, conf, profile_root, cache_root)
+        # Register in the global project registry so 'tamago prune' and future
+        # 'tamago update --all' can find this project.
+        add_project_to_registry(project_root, registry_path)
+
+    rc = setup_external_skills(operation, conf.skills, project_root, cache_root)
+
+    # Clean up machine.toml and registry entry after uninstall.
+    # setup(UNINSTALL) already removes tamago.conf and machine.env;
+    # machine.toml and the registry entry are our responsibility here.
+    if operation == Operation.UNINSTALL:
+        if machine_toml_path.exists():
+            machine_toml_path.unlink()
+            print(f"removed {machine_toml_path}")
+        remove_project_from_registry(project_root, registry_path)
+
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +1801,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable TTS in generated agent files — useful for RC/headless deployments",
     )
 
+    conf_parser = argparse.ArgumentParser(add_help=False)
+    conf_parser.add_argument(
+        "--config",
+        dest="config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to a TOML tamago.conf (v2 mode); when given, all other install flags "
+            "are ignored — profile, tts, and memory_sync come from the config file. "
+            "Auto-detection is not yet implemented: the flag must be explicit."
+        ),
+    )
+
     parser = argparse.ArgumentParser(
         description="Tamago — AI agent setup tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -828,12 +1838,17 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         Operation.INSTALL.value,
         help="symlink skills, agents, settings, and memory into the current project",
-        parents=[source_parser, profile_parser],
+        parents=[source_parser, profile_parser, conf_parser],
     )
     subparsers.add_parser(
         Operation.UNINSTALL.value,
         help="remove symlinks created by install",
-        parents=[source_parser, profile_parser],
+        parents=[source_parser, profile_parser, conf_parser],
+    )
+    subparsers.add_parser(
+        "update",
+        help="update installed agents and skills — alias for install",
+        parents=[source_parser, profile_parser, conf_parser],
     )
 
     doctor_parser = subparsers.add_parser(
@@ -849,12 +1864,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="project directory to check (default: current working directory)",
     )
 
+    prune_parser = subparsers.add_parser(
+        "prune",
+        help="remove skill cache dirs no longer used by any tamago-installed project",
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="show what would be removed without actually deleting anything",
+    )
+    prune_parser.add_argument(
+        "--cache-root",
+        dest="cache_root",
+        default=None,
+        metavar="PATH",
+        help=f"skill repo cache directory (default: {DEFAULT_CACHE_ROOT})",
+    )
+    prune_parser.add_argument(
+        "--registry",
+        dest="registry",
+        default=None,
+        metavar="PATH",
+        help=f"project registry file (default: {KNOWN_PROJECTS_FILE})",
+    )
+
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    # Track whether this was 'tamago update' before aliasing — determines whether
+    # cached skill repos should be pulled (update pulls; install does not).
+    was_update = args.command == "update"
+
+    # 'update' is an alias for 'install' — same behaviour, future-proof name.
+    if args.command == "update":
+        args.command = "install"
+
+    # prune doesn't need source_root — handle it before resolution.
+    if args.command == "prune":
+        cache_root = Path(args.cache_root).expanduser() if args.cache_root else DEFAULT_CACHE_ROOT
+        registry_path = Path(args.registry).expanduser() if args.registry else KNOWN_PROJECTS_FILE
+        return prune(cache_root=cache_root, registry_path=registry_path, dry_run=args.dry_run)
 
     project_root = Path.cwd()
 
@@ -880,6 +1934,22 @@ def main() -> int:
 
     if args.command == "uninstall-global":
         return setup_global(Operation.UNINSTALL, source_root)
+
+    # v2 path: tamago.conf --config flag routes to install_from_conf, bypassing all
+    # legacy profile/tts/memory-sync flags.  Auto-detection of ./tamago.conf is
+    # intentionally NOT implemented yet (Slice D).
+    config_path = getattr(args, "config", None)
+    if config_path is not None and args.command in (
+        Operation.INSTALL.value,
+        Operation.UNINSTALL.value,
+    ):
+        return install_from_conf(
+            Path(config_path).expanduser(),
+            Operation.INSTALL if args.command == Operation.INSTALL.value else Operation.UNINSTALL,
+            source_root,
+            project_root,
+            pull_cached_skills=was_update,
+        )
 
     # Resolve profile root from whichever flag was given (or None)
     try:

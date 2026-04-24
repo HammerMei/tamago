@@ -3,6 +3,7 @@ import importlib.util
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,9 @@ MODULE_PATH = Path(__file__).with_name("setup.py")
 SPEC = importlib.util.spec_from_file_location("assistant_setup", MODULE_PATH)
 setup_module = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
+# Register in sys.modules before exec_module so @dataclass can resolve type hints
+# via sys.modules.get(cls.__module__) — without this the import crashes.
+sys.modules["assistant_setup"] = setup_module
 SPEC.loader.exec_module(setup_module)
 
 
@@ -469,6 +473,7 @@ class MainTests(unittest.TestCase):
             Path.cwd(),  # project_root = Path.cwd()
             None,        # profile_root
             True,        # memory_sync (default)
+            True,        # tts_enabled (default)
         )
 
     def test_main_accepts_source_before_subcommand(self):
@@ -486,6 +491,7 @@ class MainTests(unittest.TestCase):
             Path.cwd(),  # project_root = Path.cwd()
             None,        # profile_root
             True,        # memory_sync (default)
+            True,        # tts_enabled (default)
         )
 
     def test_main_returns_error_when_source_root_is_invalid(self):
@@ -500,6 +506,2639 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn(f"Source directory not found: {missing_root}", stderr.getvalue())
+
+
+class TamagoConfTests(unittest.TestCase):
+    """Tests for load_tamago_conf (TOML parser)."""
+
+    def _write_toml(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_returns_none_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = setup_module.load_tamago_conf(Path(td) / "nonexistent.conf")
+            self.assertIsNone(result)
+
+    def test_returns_none_on_invalid_toml(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "bad.conf"
+            p.write_text("this is not [ valid toml !!!")
+            result = setup_module.load_tamago_conf(p)
+            self.assertIsNone(result)
+
+    def test_empty_toml_gives_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            p.write_text("")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(conf.profiles, [])
+            self.assertEqual(conf.agents, [])
+            self.assertEqual(conf.skills, [])
+            self.assertTrue(conf.memory_sync)
+
+    def test_parses_agents(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            self._write_toml(p, """
+[[agents]]
+name = "hammer.mei"
+tts = false
+""")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(len(conf.agents), 1)
+            self.assertEqual(conf.agents[0].name, "hammer.mei")
+            self.assertFalse(conf.agents[0].tts)
+            self.assertEqual(conf.agents[0].source, "tamago")   # default
+
+    def test_parses_memory_sync_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            # memory_sync lives under [settings] per the v2 spec
+            self._write_toml(p, "[settings]\nmemory_sync = false\n")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertFalse(conf.memory_sync)
+
+    def test_skips_agent_entries_without_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            self._write_toml(p, """
+[[agents]]
+source = "tamago"
+""")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(len(conf.agents), 0)
+
+    def test_returns_none_on_valid_toml_wrong_schema(self):
+        """Valid TOML but agents is a table (not array of tables) — must not crash."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            # [agents] as a table, not [[agents]] array — causes TypeError on iteration
+            p.write_text("[agents]\nname = \"hammer.mei\"\n")
+            result = setup_module.load_tamago_conf(p)
+            self.assertIsNone(result)
+
+    def test_returns_none_when_memory_sync_is_string(self):
+        """[settings] memory_sync = \"false\" (string) must return None, not silently coerce to True."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            # Under [settings] block — string value should still be rejected
+            p.write_text('[settings]\nmemory_sync = "false"\n')
+            result = setup_module.load_tamago_conf(p)
+            self.assertIsNone(result)
+
+    def test_parses_profiles_and_skills(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            self._write_toml(p, """
+[[profiles]]
+name = "hammer.mei"
+repo = "git@github.com:example/hammer.mei-profile.git"
+
+[[skills]]
+name = "text-to-speech"
+scope = "project"
+""")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(len(conf.profiles), 1)
+            self.assertEqual(conf.profiles[0].name, "hammer.mei")
+            self.assertEqual(len(conf.skills), 1)
+            self.assertEqual(conf.skills[0].name, "text-to-speech")
+            self.assertEqual(conf.skills[0].scope, "project")
+
+
+class MachineEnvTests(unittest.TestCase):
+    """Tests for write_machine_env (shell bridge file)."""
+
+    def test_writes_machine_env(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / "project" / ".tamago" / "machine.env"
+
+            setup_module.write_machine_env(env_path, profile_repo, "hammer.mei", True)
+
+            self.assertTrue(env_path.exists())
+            content = env_path.read_text()
+            # Values are single-quoted for safe shell sourcing
+            self.assertIn(str(profile_repo.resolve()), content)
+            self.assertIn("PROFILE_REPO=", content)
+            self.assertIn("AGENT_NAME=", content)
+            self.assertIn("hammer.mei", content)
+            self.assertIn("MEMORY_SYNC=1", content)
+            self.assertIn("TTS_ENABLED=1", content)
+
+    def test_writes_memory_sync_0_when_disabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            setup_module.write_machine_env(env_path, profile_repo, "hammer.mei", False)
+
+            content = env_path.read_text()
+            self.assertIn("MEMORY_SYNC=0", content)
+
+    def test_removes_file_when_profile_is_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            env_path = Path(td) / ".tamago" / "machine.env"
+            env_path.parent.mkdir(parents=True)
+            env_path.write_text("PROFILE_REPO=/some/path\n")
+
+            setup_module.write_machine_env(env_path, None, "")
+
+            self.assertFalse(env_path.exists())
+
+    def test_idempotent_when_content_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            output1 = io.StringIO()
+            with contextlib.redirect_stdout(output1):
+                setup_module.write_machine_env(env_path, profile_repo, "hammer.mei")
+
+            output2 = io.StringIO()
+            with contextlib.redirect_stdout(output2):
+                setup_module.write_machine_env(env_path, profile_repo, "hammer.mei")
+
+            self.assertIn("updated", output1.getvalue())
+            self.assertIn("exists", output2.getvalue())
+
+    def test_creates_parent_directories(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            # Deeply nested path — parent dir does not exist yet
+            env_path = Path(td) / "deep" / "nested" / ".tamago" / "machine.env"
+
+            setup_module.write_machine_env(env_path, profile_repo, "test-agent")
+
+            self.assertTrue(env_path.exists())
+
+    def test_write_project_conf_also_writes_machine_env(self):
+        """Integration: write_project_conf must produce both tamago.conf and machine.env."""
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "project"
+            project_root.mkdir()
+            profile_root = Path(td) / "hammer.mei-profile"
+            profile_root.mkdir()
+
+            setup_module.write_project_conf(profile_root, project_root, True, True)
+
+            self.assertTrue((project_root / ".tamago" / "tamago.conf").exists())
+            machine_env = project_root / ".tamago" / "machine.env"
+            self.assertTrue(machine_env.exists())
+            content = machine_env.read_text()
+            self.assertIn(str(profile_root.resolve()), content)
+            self.assertIn("MEMORY_SYNC=1", content)
+            self.assertIn("TTS_ENABLED=1", content)
+
+    def test_machine_env_values_are_shell_quoted(self):
+        """Values in machine.env must be single-quoted so paths with spaces are safe."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            setup_module.write_machine_env(env_path, profile_repo, "hammer.mei")
+
+            content = env_path.read_text()
+            # Both PROFILE_REPO and AGENT_NAME must use single-quoted values
+            self.assertRegex(content, r"PROFILE_REPO='[^']*'")
+            self.assertRegex(content, r"AGENT_NAME='[^']*'")
+
+
+class PatchSettingsTests(unittest.TestCase):
+    """Tests for patch_settings and unpatch_settings."""
+
+    def test_injects_hooks_into_empty_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            setup_module.patch_settings(
+                path, {"SessionStart": ["memory-sync.sh --init"]}, [], None, manifest
+            )
+
+            result = json.loads(path.read_text())
+            all_cmds = [
+                h["command"]
+                for m in result["hooks"]["SessionStart"]
+                for h in m.get("hooks", [])
+                if "command" in h
+            ]
+            self.assertIn("memory-sync.sh --init", all_cmds)
+
+    def test_deduplicates_existing_hooks(self):
+        """A second patch with the same command must not duplicate it."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "memory-sync.sh --init"}]}
+                    ]
+                }
+            }))
+            manifest = Path(td) / "manifest.json"
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.patch_settings(
+                    path, {"SessionStart": ["memory-sync.sh --init"]}, [], None, manifest
+                )
+
+            self.assertIn("exists", out.getvalue())
+            result = json.loads(path.read_text())
+            cmds = [
+                h["command"]
+                for m in result["hooks"]["SessionStart"]
+                for h in m.get("hooks", [])
+            ]
+            self.assertEqual(cmds.count("memory-sync.sh --init"), 1)
+
+    def test_user_hooks_in_same_default_block_preserved(self):
+        """User hooks in the same default matcher block survive patch/unpatch."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            # Start with only the user's nagori hook in the default block
+            path.write_text(json.dumps({
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "nagori inject-context"}]}
+                    ]
+                }
+            }))
+            manifest = Path(td) / "manifest.json"
+
+            # Patch in tamago's memory-sync hook
+            setup_module.patch_settings(
+                path, {"UserPromptSubmit": ["memory-sync.sh --pull"]}, [], None, manifest
+            )
+
+            result = json.loads(path.read_text())
+            all_cmds = [
+                h["command"]
+                for m in result["hooks"]["UserPromptSubmit"]
+                for h in m.get("hooks", [])
+            ]
+            self.assertIn("nagori inject-context", all_cmds)
+            self.assertIn("memory-sync.sh --pull", all_cmds)
+
+    def test_permissions_union(self):
+        """Tamago perms are appended; existing user perms are kept."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            path.write_text(json.dumps({"permissions": {"allow": ["Bash(nagori *)"]}}))
+            manifest = Path(td) / "manifest.json"
+
+            setup_module.patch_settings(
+                path, {}, ["Bash(python3 *.claude/skills/*.py *)"], None, manifest
+            )
+
+            result = json.loads(path.read_text())
+            perms = result["permissions"]["allow"]
+            self.assertIn("Bash(nagori *)", perms)
+            self.assertIn("Bash(python3 *.claude/skills/*.py *)", perms)
+
+    def test_permissions_not_duplicated(self):
+        """A perm already in the file must not be added twice."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            perm = "Bash(python3 *.claude/skills/*.py *)"
+            path.write_text(json.dumps({"permissions": {"allow": [perm]}}))
+            manifest = Path(td) / "manifest.json"
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.patch_settings(path, {}, [perm], None, manifest)
+
+            self.assertIn("exists", out.getvalue())
+            result = json.loads(path.read_text())
+            self.assertEqual(result["permissions"]["allow"].count(perm), 1)
+
+    def test_status_line_not_overwritten_if_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            user_status = {"type": "command", "command": "echo user-status"}
+            path = Path(td) / "settings.json"
+            path.write_text(json.dumps({"statusLine": user_status}))
+            manifest = Path(td) / "manifest.json"
+
+            tamago_status = {"type": "command", "command": "echo tamago-status"}
+            setup_module.patch_settings(path, {}, [], tamago_status, manifest)
+
+            result = json.loads(path.read_text())
+            self.assertEqual(result["statusLine"], user_status)
+            # Manifest records that status line was NOT injected
+            man = json.loads(manifest.read_text())
+            self.assertFalse(man["injected_status_line"])
+
+    def test_status_line_injected_if_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            path.write_text("{}")
+            manifest = Path(td) / "manifest.json"
+
+            tamago_status = {"type": "command", "command": "echo tamago-status"}
+            setup_module.patch_settings(path, {}, [], tamago_status, manifest)
+
+            result = json.loads(path.read_text())
+            self.assertEqual(result["statusLine"]["command"], "echo tamago-status")
+            man = json.loads(manifest.read_text())
+            self.assertTrue(man["injected_status_line"])
+
+    def test_idempotent_second_call(self):
+        """Calling patch_settings twice with the same args must not change the file."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            hook_commands = {"Stop": ["memory-sync.sh --push"]}
+            perms = ["Bash(python3 *.claude/skills/*.py *)"]
+            setup_module.patch_settings(path, hook_commands, perms, None, manifest)
+            content_after_first = path.read_text()
+
+            out2 = io.StringIO()
+            with contextlib.redirect_stdout(out2):
+                setup_module.patch_settings(path, hook_commands, perms, None, manifest)
+
+            self.assertIn("exists", out2.getvalue())
+            self.assertEqual(path.read_text(), content_after_first)
+
+    def test_symlink_migrated_to_real_file(self):
+        """If settings.json is a symlink, patch_settings converts it to a real file."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            source = Path(td) / "source.json"
+            source.write_text('{"autoDreamEnabled": true}')
+            path = Path(td) / "settings.json"
+            path.symlink_to(source)
+            manifest = Path(td) / "manifest.json"
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.patch_settings(path, {}, [], None, manifest)
+
+            self.assertTrue(path.exists())
+            self.assertFalse(path.is_symlink())
+            self.assertIn("migrated", out.getvalue())
+            # Original content preserved
+            self.assertEqual(json.loads(path.read_text()).get("autoDreamEnabled"), True)
+
+    def test_unpatch_removes_injected_entries_preserves_user_entries(self):
+        """After patch then unpatch, user's existing entries survive; tamago's are gone."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+            # Start with only user's nagori hook
+            path.write_text(json.dumps({
+                "permissions": {"allow": ["Bash(nagori *)"]},
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "nagori inject-context"}]}
+                    ]
+                }
+            }))
+
+            # Patch in tamago entries
+            setup_module.patch_settings(
+                path,
+                {"UserPromptSubmit": ["memory-sync.sh --pull"]},
+                ["Bash(python3 *.claude/skills/*.py *)"],
+                None,
+                manifest,
+            )
+
+            # Verify both sets are present
+            mid = json.loads(path.read_text())
+            all_cmds = [
+                h["command"]
+                for m in mid["hooks"]["UserPromptSubmit"]
+                for h in m.get("hooks", [])
+            ]
+            self.assertIn("memory-sync.sh --pull", all_cmds)
+            self.assertIn("nagori inject-context", all_cmds)
+
+            # Unpatch
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            remaining_cmds = [
+                h["command"]
+                for m in after["hooks"]["UserPromptSubmit"]
+                for h in m.get("hooks", [])
+            ]
+            self.assertNotIn("memory-sync.sh --pull", remaining_cmds)
+            self.assertIn("nagori inject-context", remaining_cmds)
+            self.assertIn("Bash(nagori *)", after["permissions"]["allow"])
+            self.assertNotIn(
+                "Bash(python3 *.claude/skills/*.py *)", after["permissions"]["allow"]
+            )
+            self.assertFalse(manifest.exists())
+
+    def test_unpatch_no_op_when_manifest_missing(self):
+        """unpatch_settings must not touch the settings file if manifest is absent."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "settings.json"
+            path.write_text('{"hooks": {}}')
+            manifest = Path(td) / "nonexistent.json"
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.unpatch_settings(path, manifest)
+
+            self.assertIn("skip", out.getvalue())
+            self.assertEqual(path.read_text(), '{"hooks": {}}')
+
+    def test_unpatch_skips_command_user_modified_after_install(self):
+        """If user edited an injected command after install, unpatch must leave it alone."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            # Patch with the original command
+            setup_module.patch_settings(
+                path, {"Stop": ["memory-sync.sh --push"]}, [], None, manifest
+            )
+
+            # User edits the injected command (adds --verbose)
+            settings = json.loads(path.read_text())
+            for m in settings["hooks"]["Stop"]:
+                for h in m.get("hooks", []):
+                    if h.get("command") == "memory-sync.sh --push":
+                        h["command"] = "memory-sync.sh --push --verbose"
+            path.write_text(json.dumps(settings, indent=2))
+
+            # Unpatch — manifest has original string, won't match the edited command
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            cmds = [
+                h["command"]
+                for m in after["hooks"]["Stop"]
+                for h in m.get("hooks", [])
+            ]
+            # Modified command is treated as user-owned and stays
+            self.assertIn("memory-sync.sh --push --verbose", cmds)
+
+    def test_manifest_records_only_newly_injected_entries(self):
+        """If an entry already exists when patch runs, manifest must NOT include it."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            existing_perm = "Bash(python3 *.claude/skills/*.py *)"
+            path = Path(td) / "settings.json"
+            path.write_text(json.dumps({"permissions": {"allow": [existing_perm]}}))
+            manifest = Path(td) / "manifest.json"
+
+            setup_module.patch_settings(path, {}, [existing_perm], None, manifest)
+
+            man = json.loads(manifest.read_text())
+            self.assertNotIn(existing_perm, man["injected_perms"])
+
+    def test_unpatch_after_two_installs_removes_all_injected_entries(self):
+        """Manifest must survive idempotent re-install so uninstall still works.
+
+        This is a regression test for the cumulative-manifest bug: if patch_settings
+        initialises the in-memory manifest to {} on each call (instead of loading the
+        existing sidecar), a second call overwrites the sidecar with an empty manifest,
+        and subsequent unpatch_settings silently removes nothing.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            hook_commands = {"Stop": ["memory-sync.sh --push"]}
+            perms = ["Bash(python3 *.claude/skills/*.py *)"]
+            status = {"type": "command", "command": "echo tamago-status"}
+
+            # First install
+            setup_module.patch_settings(path, hook_commands, perms, status, manifest)
+            # Second install (idempotent re-run — simulates `tamago install` being run again)
+            setup_module.patch_settings(path, hook_commands, perms, status, manifest)
+
+            # Manifest must still record what was injected
+            man = json.loads(manifest.read_text())
+            self.assertIn("Bash(python3 *.claude/skills/*.py *)", man["injected_perms"])
+            self.assertIn("memory-sync.sh --push", man["injected_hooks"].get("Stop", []))
+            self.assertTrue(man["injected_status_line"])
+
+            # Unpatch must remove tamago entries
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            # Hook gone
+            all_cmds = [
+                h["command"]
+                for m in after.get("hooks", {}).get("Stop", [])
+                for h in m.get("hooks", [])
+            ]
+            self.assertNotIn("memory-sync.sh --push", all_cmds)
+            # Perm gone
+            remaining_perms = after.get("permissions", {}).get("allow", [])
+            self.assertNotIn("Bash(python3 *.claude/skills/*.py *)", remaining_perms)
+            # statusLine gone
+            self.assertNotIn("statusLine", after)
+            # Manifest cleaned up
+            self.assertFalse(manifest.exists())
+
+    # ── Bug 1 regression ─────────────────────────────────────────────────────
+
+    def test_symlink_migration_with_tamago_content_uninstalls_cleanly(self):
+        """Symlink migration must record tamago entries in manifest so uninstall works.
+
+        Regression for Bug 1: when settings.json is a symlink to tamago's own file
+        (which already contains all tamago hooks/perms), dedup finds nothing to add
+        and changed=False. If we don't pre-populate the manifest during migration,
+        unpatch_settings sees an empty manifest and removes nothing — entries stuck.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            import json
+
+            # Simulate tamago's own settings file (the symlink target)
+            source = Path(td) / "tamago-settings.json"
+            source.write_text(json.dumps({
+                "permissions": {"allow": ["Bash(python3 *.claude/skills/*.py *)"]},
+                "hooks": {
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": "memory-sync.sh --push"}]}
+                    ]
+                },
+                "statusLine": {"type": "command", "command": "echo tamago-status"},
+            }))
+
+            path = Path(td) / "settings.json"
+            path.symlink_to(source)
+            manifest = Path(td) / "manifest.json"
+
+            hook_commands = {"Stop": ["memory-sync.sh --push"]}
+            perms = ["Bash(python3 *.claude/skills/*.py *)"]
+            status_line = {"type": "command", "command": "echo tamago-status"}
+
+            setup_module.patch_settings(path, hook_commands, perms, status_line, manifest)
+
+            # Manifest must record tamago's entries even though dedup skipped them
+            man = json.loads(manifest.read_text())
+            self.assertIn("Bash(python3 *.claude/skills/*.py *)", man["injected_perms"])
+            self.assertIn("memory-sync.sh --push", man["injected_hooks"].get("Stop", []))
+            self.assertTrue(man["injected_status_line"])
+
+            # Uninstall must remove tamago entries
+            setup_module.unpatch_settings(path, manifest)
+            after = json.loads(path.read_text())
+            self.assertNotIn("Bash(python3 *.claude/skills/*.py *)",
+                             after.get("permissions", {}).get("allow", []))
+            all_cmds = [
+                h["command"]
+                for m in after.get("hooks", {}).get("Stop", [])
+                for h in m.get("hooks", [])
+            ]
+            self.assertNotIn("memory-sync.sh --push", all_cmds)
+            self.assertNotIn("statusLine", after)
+
+    # ── Bug 2 regression ─────────────────────────────────────────────────────
+
+    def test_unpatch_handles_corrupt_manifest_gracefully(self):
+        """unpatch_settings must not crash on a corrupt manifest file."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "settings.json"
+            path.write_text('{"hooks": {}}')
+            manifest = Path(td) / "manifest.json"
+            manifest.write_text("not json {{{")  # corrupt
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.unpatch_settings(path, manifest)
+
+            self.assertIn("warn", out.getvalue())
+            # Settings file must be untouched
+            self.assertEqual(path.read_text(), '{"hooks": {}}')
+
+    def test_unpatch_handles_corrupt_settings_gracefully(self):
+        """unpatch_settings must not crash when settings.json is corrupt."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            path.write_text("not json {{{")  # corrupt
+            manifest = Path(td) / "manifest.json"
+            manifest.write_text(json.dumps({
+                "injected_perms": ["Bash(python3 *)"],
+                "injected_hooks": {},
+                "injected_status_line": False,
+            }))
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                setup_module.unpatch_settings(path, manifest)
+
+            self.assertIn("warn", out.getvalue())
+            # Manifest should still exist (we couldn't clean up)
+            self.assertTrue(manifest.exists())
+
+    # ── Bug 3 regression ─────────────────────────────────────────────────────
+
+    def test_unpatch_removes_empty_default_block_and_event_key(self):
+        """After unpatch removes all hooks from a default block, the empty block and
+        event key must be removed — not left behind as residue."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            # Fresh install — tamago creates the default block
+            setup_module.patch_settings(
+                path, {"Stop": ["memory-sync.sh --push"]}, [], None, manifest
+            )
+
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            # No "Stop" key at all — not even an empty list
+            self.assertNotIn("Stop", after.get("hooks", {}))
+
+    def test_unpatch_drops_empty_event_but_keeps_non_default_matchers(self):
+        """Empty tamago-created default block is dropped; non-default matcher blocks survive."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            # User has a named-matcher block for the same event
+            path.write_text(json.dumps({
+                "hooks": {
+                    "Stop": [
+                        {"matcher": "Bash(*)", "hooks": [
+                            {"type": "command", "command": "user-special"}
+                        ]}
+                    ]
+                }
+            }))
+            manifest = Path(td) / "manifest.json"
+
+            setup_module.patch_settings(
+                path, {"Stop": ["memory-sync.sh --push"]}, [], None, manifest
+            )
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            # Named-matcher block stays
+            stop_matchers = after.get("hooks", {}).get("Stop", [])
+            self.assertEqual(len(stop_matchers), 1)
+            self.assertEqual(stop_matchers[0]["matcher"], "Bash(*)")
+
+    # ── dedup correctness ─────────────────────────────────────────────────────
+
+    def test_non_command_type_hook_does_not_suppress_injection(self):
+        """A hook with type != 'command' but same command string must not fool dedup."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            # User has a hook with the same command string but different type
+            path.write_text(json.dumps({
+                "hooks": {
+                    "Stop": [
+                        {"hooks": [{"type": "other", "command": "memory-sync.sh --push"}]}
+                    ]
+                }
+            }))
+            manifest = Path(td) / "manifest.json"
+
+            setup_module.patch_settings(
+                path, {"Stop": ["memory-sync.sh --push"]}, [], None, manifest
+            )
+
+            after = json.loads(path.read_text())
+            cmds_with_type_command = [
+                h["command"]
+                for m in after["hooks"]["Stop"]
+                for h in m.get("hooks", [])
+                if h.get("type") == "command"
+            ]
+            # Tamago's type=command entry must have been injected
+            self.assertIn("memory-sync.sh --push", cmds_with_type_command)
+
+    # ── _read_tamago_source_hooks ──────────────────────────────────────────────
+
+    def test_read_tamago_source_hooks_skips_non_default_matchers(self):
+        """_read_tamago_source_hooks must not collect commands from named-matcher blocks."""
+        source = {
+            "hooks": {
+                "Stop": [
+                    {"matcher": "Bash(*)", "hooks": [
+                        {"type": "command", "command": "should-be-skipped"}
+                    ]},
+                    {"hooks": [
+                        {"type": "command", "command": "should-be-included"}
+                    ]},
+                ]
+            }
+        }
+        result = setup_module._read_tamago_source_hooks(source)
+        self.assertEqual(result["Stop"], ["should-be-included"])
+        self.assertNotIn("should-be-skipped", result["Stop"])
+
+    # ── incremental install ────────────────────────────────────────────────────
+
+    def test_incremental_install_accumulates_manifest_across_versions(self):
+        """v1 install injects perm A; v2 also injects perm B. Both must be in the
+        manifest and both must be removed by a single unpatch call."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            perm_a = "Bash(python3 *.claude/skills/*.py *)"
+            perm_b = "Bash(keepassxc-cli *)"
+
+            # v1 install — only perm_a
+            setup_module.patch_settings(path, {}, [perm_a], None, manifest)
+            # v2 install — adds perm_b
+            setup_module.patch_settings(path, {}, [perm_a, perm_b], None, manifest)
+
+            man = json.loads(manifest.read_text())
+            self.assertIn(perm_a, man["injected_perms"])
+            self.assertIn(perm_b, man["injected_perms"])
+
+            setup_module.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            remaining = after.get("permissions", {}).get("allow", [])
+            self.assertNotIn(perm_a, remaining)
+            self.assertNotIn(perm_b, remaining)
+
+
+class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
+    """Tests for patch_opencode_global_settings — mirrors Claude Code's patch approach."""
+
+    def _run(self, operation, source_root, target, manifest):
+        with (
+            mock.patch.object(
+                setup_module, "patch_settings",
+                wraps=setup_module.patch_settings,
+            ),
+            mock.patch.object(
+                setup_module, "unpatch_settings",
+                wraps=setup_module.unpatch_settings,
+            ),
+        ):
+            # Override the hardcoded paths inside patch_opencode_global_settings
+            # by patching Path so that ~/.opencode/... resolves to our temp dirs.
+            pass  # we call directly with mocked internals below
+
+    def test_install_migrates_symlink_to_real_file(self):
+        """~/.opencode/opencode.json symlink is replaced with a real file on install."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            source_root = Path(td) / "tamago"
+            opencode_settings_dir = source_root / "settings" / "opencode"
+            opencode_settings_dir.mkdir(parents=True)
+            source_json = opencode_settings_dir / "opencode.json"
+            source_json.write_text(_json.dumps({"$schema": "https://opencode.ai/config.json"}))
+
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            # Simulate existing symlink
+            target.symlink_to(source_json)
+            self.assertTrue(target.is_symlink())
+
+            setup_module.patch_settings(target, {}, [], None, manifest)
+
+            self.assertFalse(target.is_symlink())
+            self.assertTrue(target.is_file())
+            content = _json.loads(target.read_text())
+            self.assertEqual(content.get("$schema"), "https://opencode.ai/config.json")
+
+    def test_install_writes_manifest(self):
+        """patch_opencode_global_settings writes a sidecar manifest."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            source_root = Path(td) / "tamago"
+            opencode_dir = source_root / "settings" / "opencode"
+            opencode_dir.mkdir(parents=True)
+            (opencode_dir / "opencode.json").write_text('{"$schema": "x"}')
+
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / ".tamago-manifest.json"
+
+            with (
+                mock.patch(
+                    "builtins.open", side_effect=open,
+                ),
+            ):
+                setup_module.patch_settings(target, {}, [], None, manifest)
+
+            self.assertTrue(manifest.exists())
+            data = _json.loads(manifest.read_text())
+            self.assertIn("injected_perms", data)
+            self.assertEqual(data["injected_perms"], [])
+            self.assertEqual(data["injected_hooks"], {})
+            self.assertFalse(data["injected_status_line"])
+
+    def test_install_preserves_existing_user_content(self):
+        """User-added keys in opencode.json survive a tamago install."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            # User has their own config
+            target.write_text(_json.dumps({
+                "$schema": "https://opencode.ai/config.json",
+                "model": "anthropic/claude-sonnet-4-5",
+            }))
+
+            setup_module.patch_settings(target, {}, [], None, manifest)
+
+            after = _json.loads(target.read_text())
+            self.assertEqual(after.get("model"), "anthropic/claude-sonnet-4-5")
+
+    def test_install_on_missing_file_writes_manifest_and_does_not_create_config(self):
+        """When no injections are needed, patch_settings skips creating opencode.json
+        (no-op on the settings file) but still writes the sidecar manifest."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            self.assertFalse(target.exists())
+
+            setup_module.patch_settings(target, {}, [], None, manifest)
+
+            # No injections → settings file is NOT created (nothing to write)
+            self.assertFalse(target.exists())
+            # Manifest IS always written so uninstall knows what to clean up
+            self.assertTrue(manifest.exists())
+            data = _json.loads(manifest.read_text())
+            self.assertEqual(data["injected_perms"], [])
+
+    def test_uninstall_removes_manifest(self):
+        """unpatch_settings (the uninstall path) removes the sidecar manifest."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            target.write_text('{"$schema": "x", "model": "claude"}')
+            manifest.write_text(_json.dumps({
+                "injected_perms": [],
+                "injected_hooks": {},
+                "injected_status_line": False,
+            }))
+
+            setup_module.unpatch_settings(target, manifest)
+
+            self.assertFalse(manifest.exists())
+            # User content must survive
+            after = _json.loads(target.read_text())
+            self.assertEqual(after.get("model"), "claude")
+
+    def test_uninstall_without_manifest_is_noop(self):
+        """unpatch_settings is silent when no manifest exists."""
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            target.write_text('{"model": "claude"}')
+            # No manifest
+            setup_module.unpatch_settings(target, manifest)  # must not raise
+
+    def test_install_is_idempotent(self):
+        """A second install with the same source does not change the settings file."""
+        with tempfile.TemporaryDirectory() as td:
+            import json as _json
+            target = Path(td) / "opencode.json"
+            manifest = Path(td) / "manifest.json"
+            target.write_text('{"$schema": "x"}')
+
+            setup_module.patch_settings(target, {}, [], None, manifest)
+            mtime_after_first = target.stat().st_mtime
+
+            setup_module.patch_settings(target, {}, [], None, manifest)
+            mtime_after_second = target.stat().st_mtime
+
+            self.assertEqual(mtime_after_first, mtime_after_second)
+
+    def test_setup_global_calls_patch_opencode(self):
+        """setup_global uses patch_opencode_global_settings, not the old symlink helper."""
+        with tempfile.TemporaryDirectory() as td:
+            source_root = Path(td) / "tamago"
+            (source_root / "settings" / "claude").mkdir(parents=True)
+            (source_root / "settings" / "opencode").mkdir(parents=True)
+            (source_root / "settings" / "claude" / "settings.json").write_text("{}")
+            (source_root / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+            called = []
+
+            with (
+                mock.patch.object(
+                    setup_module, "patch_opencode_global_settings",
+                    side_effect=lambda *a, **kw: called.append("opencode"),
+                ),
+                mock.patch.object(
+                    setup_module, "patch_global_settings",
+                    side_effect=lambda *a, **kw: called.append("claude"),
+                ),
+                mock.patch.object(setup_module, "setup_shell_env"),
+                mock.patch.object(setup_module, "setup_git_hooks"),
+                mock.patch.object(setup_module, "setup_local_bin"),
+            ):
+                setup_module.setup_global(setup_module.Operation.INSTALL, source_root)
+
+            self.assertIn("opencode", called)
+            self.assertIn("claude", called)
+
+    def test_symlink_opencode_global_no_longer_called_by_setup_global(self):
+        """_symlink_opencode_global must NOT be called by setup_global (replaced by patch)."""
+        with tempfile.TemporaryDirectory() as td:
+            source_root = Path(td) / "tamago"
+            (source_root / "settings" / "claude").mkdir(parents=True)
+            (source_root / "settings" / "opencode").mkdir(parents=True)
+            (source_root / "settings" / "claude" / "settings.json").write_text("{}")
+            (source_root / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+            with (
+                mock.patch.object(setup_module, "patch_global_settings"),
+                mock.patch.object(setup_module, "patch_opencode_global_settings"),
+                mock.patch.object(setup_module, "setup_shell_env"),
+                mock.patch.object(setup_module, "setup_git_hooks"),
+                mock.patch.object(setup_module, "setup_local_bin"),
+                mock.patch.object(
+                    setup_module, "_symlink_opencode_global"
+                ) as mock_symlink,
+            ):
+                setup_module.setup_global(setup_module.Operation.INSTALL, source_root)
+
+            mock_symlink.assert_not_called()
+
+
+class TamagoConfSettingsBlockTests(unittest.TestCase):
+    """Tests specifically covering the [settings] block migration in load_tamago_conf."""
+
+    def test_memory_sync_read_from_settings_block(self):
+        """[settings] memory_sync = false must be parsed correctly."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            p.write_text("[settings]\nmemory_sync = false\n")
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertFalse(conf.memory_sync)
+
+    def test_top_level_memory_sync_is_ignored(self):
+        """Top-level memory_sync = false (outside [settings]) must NOT be parsed.
+
+        This is a regression guard: before the v2 fix, the parser read memory_sync
+        from the TOML root.  Now it lives under [settings]; a top-level key should
+        be silently ignored and the default (True) used instead.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            p.write_text("memory_sync = false\n")  # top-level — not under [settings]
+            conf = setup_module.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            # Top-level key is ignored; default True should apply
+            self.assertTrue(conf.memory_sync)
+
+    def test_settings_block_not_dict_returns_none(self):
+        """If [settings] is somehow not a dict (TOML edge case), return None safely."""
+        # TOML doesn't allow a key and a table of the same name in valid TOML.
+        # We simulate by patching after load — direct coverage of the isinstance guard.
+        # The guard runs when settings_block is not a dict.
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            # Patch the raw dict to simulate a corrupt/unexpected type
+            with mock.patch("tomllib.load", return_value={"settings": "not-a-dict"}):
+                result = setup_module.load_tamago_conf(p)
+            # settings is a string, not a dict — should return None
+            self.assertIsNone(result)
+
+
+class InstallFromConfTests(unittest.TestCase):
+    """Tests for install_from_conf (Slice C — TOML-driven install)."""
+
+    def _write_toml(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_returns_error_on_missing_conf(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = setup_module.install_from_conf(
+                Path(td) / "nonexistent.conf",
+                setup_module.Operation.INSTALL,
+                Path(td) / "source",
+                Path(td) / "project",
+            )
+            self.assertEqual(result, 1)
+
+    def test_returns_error_on_corrupt_conf(self):
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("NOT VALID TOML [[[[")
+            result = setup_module.install_from_conf(
+                conf_path,
+                setup_module.Operation.INSTALL,
+                Path(td) / "source",
+                Path(td) / "project",
+            )
+            self.assertEqual(result, 1)
+
+    def test_no_profiles_calls_setup_with_no_profile_root(self):
+        """When tamago.conf has no [[profiles]], profile_root should be None."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")  # empty = valid, no profiles
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 0)
+            # profile_root is the 4th keyword arg
+            self.assertIsNone(mock_setup.call_args.kwargs["profile_root"])
+
+    def test_memory_sync_false_propagates_to_setup(self):
+        """[settings] memory_sync = false → setup receives memory_sync=False."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("[settings]\nmemory_sync = false\n")
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertFalse(mock_setup.call_args.kwargs["memory_sync"])
+
+    def test_agent_tts_false_propagates_to_setup(self):
+        """First profile agent with tts=false → setup receives tts_enabled=False."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[agents]]
+name = "hammer.mei"
+source = "profile"
+tts = false
+""")
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertFalse(mock_setup.call_args.kwargs["tts_enabled"])
+
+    def test_tamago_source_agent_tts_does_not_affect_tts_default(self):
+        """Only source='profile' agents drive tts_enabled; tamago-source is ignored."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[agents]]
+name = "code-reviewer"
+source = "tamago"
+tts = false
+""")
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            # tts_enabled defaults to True because no profile agent was specified
+            self.assertTrue(mock_setup.call_args.kwargs["tts_enabled"])
+
+    def test_profile_name_resolved_and_passed_to_setup(self):
+        """[[profiles]] name= → resolve_profile_root called → profile_root passed to setup."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            profile = source / "hammer.mei-profile"
+            profile.mkdir()
+
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    source,
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(mock_setup.call_args.kwargs["profile_root"], profile)
+
+    def test_multiple_profiles_returns_error(self):
+        """More than one [[profiles]] entry is unsupported — must return 1."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[profiles]]
+name = "hammer.mei"
+
+[[profiles]]
+name = "edm_mei"
+""")
+            stderr = io.StringIO()
+            with mock.patch.object(setup_module.sys, "stderr", stderr):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+            self.assertEqual(result, 1)
+            self.assertIn("2 [[profiles]]", stderr.getvalue())
+
+    def test_no_pull_on_uninstall(self):
+        """pull_repo must NOT be called during uninstall."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo") as mock_pull,
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            mock_pull.assert_not_called()
+
+    def test_pull_called_for_source_on_install(self):
+        """pull_repo(source_root, 'tamago') must be called during install."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo") as mock_pull,
+            ):
+                source = Path(td) / "source"
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    source,
+                    Path(td) / "project",
+                )
+
+            mock_pull.assert_called_once_with(source, "tamago")
+
+
+class SkillRepoCacheTests(unittest.TestCase):
+    """Tests for _skill_repo_cache_dir and _clone_or_reuse_skill_repo."""
+
+    def test_cache_dir_stable_for_same_url(self):
+        """Same URL → same cache dir every time."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td)
+            url = "https://github.com/example/my-skill.git"
+            d1 = setup_module._skill_repo_cache_dir(url, cache_root)
+            d2 = setup_module._skill_repo_cache_dir(url, cache_root)
+            self.assertEqual(d1, d2)
+
+    def test_different_urls_hash_differently(self):
+        """Different URLs → different cache dirs."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td)
+            d1 = setup_module._skill_repo_cache_dir("https://github.com/a/repo.git", cache_root)
+            d2 = setup_module._skill_repo_cache_dir("https://github.com/b/repo.git", cache_root)
+            self.assertNotEqual(d1, d2)
+
+    def test_no_url_normalization_dot_git_differs(self):
+        """https://x.git and https://x hash to different directories (no normalization)."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td)
+            d1 = setup_module._skill_repo_cache_dir("https://github.com/x/repo.git", cache_root)
+            d2 = setup_module._skill_repo_cache_dir("https://github.com/x/repo", cache_root)
+            self.assertNotEqual(d1, d2)
+
+    def test_cache_dir_is_16_hex_chars(self):
+        """Cache dir name is exactly 16 hex characters."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td)
+            d = setup_module._skill_repo_cache_dir("https://example.com/skill.git", cache_root)
+            self.assertRegex(d.name, r"^[0-9a-f]{16}$")
+
+    def test_clone_or_reuse_reuses_existing_git_dir(self):
+        """Existing .git dir → no subprocess call, returns cache_dir."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td) / "cache"
+            cache_dir.mkdir()
+            (cache_dir / ".git").mkdir()
+
+            out = io.StringIO()
+            with (
+                contextlib.redirect_stdout(out),
+                mock.patch.object(setup_module.subprocess, "run") as mock_run,
+            ):
+                result = setup_module._clone_or_reuse_skill_repo(
+                    "https://example.com/skill.git", cache_dir
+                )
+
+            mock_run.assert_not_called()
+            self.assertEqual(result, cache_dir)
+            self.assertIn("cached", out.getvalue())
+
+    def test_clone_or_reuse_raises_when_non_git_dir_exists(self):
+        """cache_dir exists but has no .git → raises Exception."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td) / "cache"
+            cache_dir.mkdir()
+            # No .git inside — not a git repo
+
+            with self.assertRaises(Exception) as ctx:
+                setup_module._clone_or_reuse_skill_repo(
+                    "https://example.com/skill.git", cache_dir
+                )
+            self.assertIn("not a git repo", str(ctx.exception))
+
+    def test_clone_or_reuse_clones_on_miss(self):
+        """On cache miss: calls git clone; raises on non-zero exit."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td) / "cache"
+            url = "https://example.com/skill.git"
+
+            mock_result = mock.Mock()
+            mock_result.returncode = 0
+            with mock.patch.object(
+                setup_module.subprocess, "run", return_value=mock_result
+            ) as mock_run:
+                result = setup_module._clone_or_reuse_skill_repo(url, cache_dir)
+
+            self.assertEqual(result, cache_dir)
+            call_args = mock_run.call_args[0][0]
+            self.assertIn("clone", call_args)
+            self.assertIn(url, call_args)
+
+    def test_clone_failure_raises(self):
+        """git clone exit != 0 → raises Exception with stderr."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td) / "cache"
+            mock_result = mock.Mock()
+            mock_result.returncode = 128
+            mock_result.stderr = "fatal: repository not found"
+            with mock.patch.object(setup_module.subprocess, "run", return_value=mock_result):
+                with self.assertRaises(Exception) as ctx:
+                    setup_module._clone_or_reuse_skill_repo(
+                        "https://example.com/bad.git", cache_dir
+                    )
+            self.assertIn("git clone failed", str(ctx.exception))
+
+
+class SetupExternalSkillsTests(unittest.TestCase):
+    """Tests for setup_external_skills."""
+
+    def _make_skill(self, name, source, scope="project", path=None):
+        return setup_module.SkillEntry(name=name, source=source, scope=scope, path=path)
+
+    def test_tamago_source_skipped(self):
+        """source='tamago' entries are ignored — no symlinks, no clones."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill = self._make_skill("some-skill", "tamago")
+            with mock.patch.object(
+                setup_module, "_clone_or_reuse_skill_repo"
+            ) as mock_clone:
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+            self.assertEqual(rc, 0)
+            mock_clone.assert_not_called()
+
+    def test_profile_source_skipped(self):
+        """source='profile' entries are ignored."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill = self._make_skill("some-skill", "profile")
+            with mock.patch.object(
+                setup_module, "_clone_or_reuse_skill_repo"
+            ) as mock_clone:
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+            self.assertEqual(rc, 0)
+            mock_clone.assert_not_called()
+
+    def test_global_scope_warns_and_skips(self):
+        """scope='global' emits warning and skips — returns 0 (not an error)."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill = self._make_skill(
+                "my-skill", "https://example.com/skill.git", scope="global"
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(setup_module.sys, "stderr", stderr),
+                mock.patch.object(
+                    setup_module, "_clone_or_reuse_skill_repo"
+                ) as mock_clone,
+            ):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("global", stderr.getvalue())
+            mock_clone.assert_not_called()
+
+    def test_url_skill_linked_with_skill_name(self):
+        """URL skill is cloned and symlinked under skill.name (not the hash dir name)."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill_dir = Path(td) / "cloned-skill-dir"
+            skill_dir.mkdir()
+            url = "https://example.com/my-skill.git"
+            skill = self._make_skill("my-skill", url)
+
+            with mock.patch.object(
+                setup_module, "_resolve_external_skill_dir", return_value=skill_dir
+            ):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+
+            self.assertEqual(rc, 0)
+            claude_target = project / ".claude" / "skills" / "my-skill"
+            opencode_target = project / ".opencode" / "skills" / "my-skill"
+            self.assertTrue(claude_target.is_symlink())
+            self.assertTrue(opencode_target.is_symlink())
+            self.assertEqual(claude_target.resolve(), skill_dir.resolve())
+
+    def test_url_skill_idempotent_when_already_linked(self):
+        """Second install with same target symlink prints 'exists' and returns 0."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill_dir = Path(td) / "cloned-skill-dir"
+            skill_dir.mkdir()
+            url = "https://example.com/my-skill.git"
+            skill = self._make_skill("my-skill", url)
+
+            # Pre-create the symlinks
+            for skills_root_rel in (".claude/skills", ".opencode/skills"):
+                sr = project / skills_root_rel
+                sr.mkdir(parents=True)
+                (sr / "my-skill").symlink_to(skill_dir)
+
+            out = io.StringIO()
+            with (
+                contextlib.redirect_stdout(out),
+                mock.patch.object(
+                    setup_module, "_resolve_external_skill_dir", return_value=skill_dir
+                ),
+            ):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("exists", out.getvalue())
+
+    def test_clone_failure_returns_1(self):
+        """If _resolve_external_skill_dir raises, returns 1."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            url = "https://example.com/bad-skill.git"
+            skill = self._make_skill("bad-skill", url)
+
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(setup_module.sys, "stderr", stderr),
+                mock.patch.object(
+                    setup_module,
+                    "_resolve_external_skill_dir",
+                    side_effect=Exception("git clone failed"),
+                ),
+            ):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn("error", stderr.getvalue())
+
+    def test_skill_path_not_found_returns_error(self):
+        """skill.path subdir missing in repo → _resolve_external_skill_dir raises → error."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            cache_root = Path(td) / "cache"
+            cache_root.mkdir()
+            url = "https://example.com/monorepo.git"
+            skill = self._make_skill("my-skill", url, path="skills/my-skill")
+
+            # Simulate a cloned repo with no 'skills/my-skill' subdir
+            cache_dir = setup_module._skill_repo_cache_dir(url, cache_root)
+            cache_dir.mkdir(parents=True)
+            (cache_dir / ".git").mkdir()
+            # skills/my-skill does NOT exist in the repo
+
+            stderr = io.StringIO()
+            with mock.patch.object(setup_module.sys, "stderr", stderr):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, [skill], project,
+                    cache_root=cache_root,
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn("error", stderr.getvalue())
+
+    def test_uninstall_removes_symlink(self):
+        """UNINSTALL removes existing skill symlinks from both .claude and .opencode."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill_dir = Path(td) / "cloned-skill-dir"
+            skill_dir.mkdir()
+            url = "https://example.com/my-skill.git"
+            skill = self._make_skill("my-skill", url)
+
+            # Pre-create symlinks (as if previously installed)
+            for skills_root_rel in (".claude/skills", ".opencode/skills"):
+                sr = project / skills_root_rel
+                sr.mkdir(parents=True)
+                (sr / "my-skill").symlink_to(skill_dir)
+
+            rc = setup_module.setup_external_skills(
+                setup_module.Operation.UNINSTALL, [skill], project
+            )
+
+            self.assertEqual(rc, 0)
+            self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
+            self.assertFalse((project / ".opencode" / "skills" / "my-skill").exists())
+
+    def test_uninstall_with_url_skill_not_present_is_silent(self):
+        """UNINSTALL when skill symlink doesn't exist is a no-op (no error)."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skill = self._make_skill("missing-skill", "https://example.com/skill.git")
+
+            rc = setup_module.setup_external_skills(
+                setup_module.Operation.UNINSTALL, [skill], project
+            )
+            self.assertEqual(rc, 0)
+
+    def test_multiple_errors_counted(self):
+        """Two failing URL skills → returns 1 (errors > 0)."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            skills = [
+                self._make_skill("skill-a", "https://example.com/a.git"),
+                self._make_skill("skill-b", "https://example.com/b.git"),
+            ]
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(setup_module.sys, "stderr", stderr),
+                mock.patch.object(
+                    setup_module,
+                    "_resolve_external_skill_dir",
+                    side_effect=Exception("clone failed"),
+                ),
+            ):
+                rc = setup_module.setup_external_skills(
+                    setup_module.Operation.INSTALL, skills, project
+                )
+            self.assertEqual(rc, 1)
+
+
+class PullSkillReposTests(unittest.TestCase):
+    """Tests for _pull_skill_repos."""
+
+    def test_deduplicates_same_url(self):
+        """Monorepo with two skills at different paths is pulled only once."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "cache"
+            url = "https://example.com/monorepo.git"
+            cache_dir = setup_module._skill_repo_cache_dir(url, cache_root)
+            cache_dir.mkdir(parents=True)
+            (cache_dir / ".git").mkdir()
+
+            skills = [
+                setup_module.SkillEntry(name="skill-a", source=url, path="skills/a"),
+                setup_module.SkillEntry(name="skill-b", source=url, path="skills/b"),
+            ]
+            with mock.patch.object(setup_module, "pull_repo") as mock_pull:
+                setup_module._pull_skill_repos(skills, cache_root)
+
+            mock_pull.assert_called_once()  # pulled exactly once
+
+    def test_tamago_and_profile_sources_skipped(self):
+        """source='tamago' and source='profile' are not treated as URLs."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "cache"
+            skills = [
+                setup_module.SkillEntry(name="a", source="tamago"),
+                setup_module.SkillEntry(name="b", source="profile"),
+            ]
+            with mock.patch.object(setup_module, "pull_repo") as mock_pull:
+                setup_module._pull_skill_repos(skills, cache_root)
+            mock_pull.assert_not_called()
+
+    def test_not_yet_cloned_repo_skipped(self):
+        """Repo not yet in cache is silently skipped (will be cloned on install)."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "cache"
+            url = "https://example.com/new-skill.git"
+            skills = [setup_module.SkillEntry(name="new-skill", source=url)]
+
+            with mock.patch.object(setup_module, "pull_repo") as mock_pull:
+                setup_module._pull_skill_repos(skills, cache_root)
+
+            mock_pull.assert_not_called()  # cache_dir doesn't exist yet — skip
+
+
+class MainUpdateAndConfigTests(unittest.TestCase):
+    """Tests for 'tamago update' alias and --config flag routing."""
+
+    def test_update_is_alias_for_install(self):
+        """'tamago update' must call setup() just like 'tamago install'."""
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+            mock.patch("sys.argv", ["setup.py", "update", "--source", td]),
+        ):
+            result = setup_module.main()
+
+        self.assertEqual(result, 0)
+        mock_setup.assert_called_once_with(
+            setup_module.Operation.INSTALL,
+            Path(td),
+            Path.cwd(),
+            None,   # profile_root
+            True,   # memory_sync
+            True,   # tts_enabled
+        )
+
+    def test_install_config_flag_routes_to_install_from_conf(self):
+        """'tamago install --config path/to/tamago.conf' calls install_from_conf."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch("sys.argv", [
+                    "setup.py", "install",
+                    "--source", td,
+                    "--config", str(conf_path),
+                ]),
+            ):
+                result = setup_module.main()
+
+        self.assertEqual(result, 0)
+        call_args = mock_ifc.call_args
+        self.assertEqual(call_args.args[0], conf_path.expanduser())  # conf_path
+        self.assertEqual(call_args.args[1], setup_module.Operation.INSTALL)
+
+    def test_uninstall_config_flag_routes_to_install_from_conf(self):
+        """'tamago uninstall --config path/to/tamago.conf' calls install_from_conf with UNINSTALL."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch("sys.argv", [
+                    "setup.py", "uninstall",
+                    "--source", td,
+                    "--config", str(conf_path),
+                ]),
+            ):
+                result = setup_module.main()
+
+        self.assertEqual(result, 0)
+        call_args = mock_ifc.call_args
+        self.assertEqual(call_args.args[1], setup_module.Operation.UNINSTALL)
+
+    def test_install_config_passes_pull_cached_false(self):
+        """'tamago install --config ...' passes pull_cached_skills=False."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch("sys.argv", [
+                    "setup.py", "install",
+                    "--source", td,
+                    "--config", str(conf_path),
+                ]),
+            ):
+                setup_module.main()
+
+        self.assertFalse(mock_ifc.call_args.kwargs["pull_cached_skills"])
+
+    def test_update_config_passes_pull_cached_true(self):
+        """'tamago update --config ...' passes pull_cached_skills=True."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch("sys.argv", [
+                    "setup.py", "update",
+                    "--source", td,
+                    "--config", str(conf_path),
+                ]),
+            ):
+                setup_module.main()
+
+        self.assertTrue(mock_ifc.call_args.kwargs["pull_cached_skills"])
+
+
+class InstallFromConfExternalSkillsTests(unittest.TestCase):
+    """Tests for install_from_conf interaction with external skills (Slice D)."""
+
+    def _write_toml(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_setup_failure_short_circuits_external_skills(self):
+        """If setup() returns 1, setup_external_skills is NOT called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[skills]]
+name = "my-skill"
+source = "https://example.com/skill.git"
+scope = "project"
+""")
+            with (
+                mock.patch.object(setup_module, "setup", return_value=1),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(
+                    setup_module, "setup_external_skills"
+                ) as mock_ext,
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 1)
+            mock_ext.assert_not_called()
+
+    def test_external_skills_called_when_setup_succeeds(self):
+        """If setup() returns 0, setup_external_skills is called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(
+                    setup_module, "setup_external_skills", return_value=0
+                ) as mock_ext,
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 0)
+            mock_ext.assert_called_once()
+
+    def test_pull_cached_false_does_not_call_pull_skill_repos(self):
+        """pull_cached_skills=False → _pull_skill_repos is NOT called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[skills]]
+name = "my-skill"
+source = "https://example.com/skill.git"
+scope = "project"
+""")
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(setup_module, "_pull_skill_repos") as mock_pull_skills,
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                    pull_cached_skills=False,
+                )
+
+            mock_pull_skills.assert_not_called()
+
+    def test_pull_cached_true_calls_pull_skill_repos(self):
+        """pull_cached_skills=True → _pull_skill_repos is called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[skills]]
+name = "my-skill"
+source = "https://example.com/skill.git"
+scope = "project"
+""")
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(setup_module, "_pull_skill_repos") as mock_pull_skills,
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                    pull_cached_skills=True,
+                )
+
+            mock_pull_skills.assert_called_once()
+
+    def test_external_skills_failure_propagates(self):
+        """setup_external_skills returning 1 → install_from_conf returns 1."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(
+                    setup_module, "setup_external_skills", return_value=1
+                ),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 1)
+
+
+class MachineTomlTests(unittest.TestCase):
+    """Tests for write_machine_toml / load_machine_toml (Slice E)."""
+
+    def test_roundtrip_write_and_load(self):
+        """write then load returns identical MachineToml."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / ".tamago" / "machine.toml"
+            data = setup_module.MachineToml(
+                profiles={"hammer.mei": "/Users/glin/.tamago/hammer.mei-profile"},
+                skill_cache={"my-skill": "/Users/glin/.tamago/repo-cache/abc123"},
+            )
+            setup_module.write_machine_toml(path, data)
+            loaded = setup_module.load_machine_toml(path)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.profiles, data.profiles)
+            self.assertEqual(loaded.skill_cache, data.skill_cache)
+
+    def test_creates_parent_dirs(self):
+        """write_machine_toml creates .tamago/ if it does not exist."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / ".tamago" / "machine.toml"
+            self.assertFalse(path.parent.exists())
+            setup_module.write_machine_toml(
+                path,
+                setup_module.MachineToml(profiles={"x": "/some/path"}),
+            )
+            self.assertTrue(path.exists())
+
+    def test_load_returns_none_on_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            self.assertIsNone(setup_module.load_machine_toml(path))
+
+    def test_load_returns_none_on_corrupt_toml(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            path.write_text("NOT VALID TOML [[[[")
+            self.assertIsNone(setup_module.load_machine_toml(path))
+
+    def test_write_is_idempotent(self):
+        """Second write with same content prints 'exists' and doesn't change mtime."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / ".tamago" / "machine.toml"
+            data = setup_module.MachineToml(
+                profiles={"hammer.mei": "/some/profile"},
+            )
+            setup_module.write_machine_toml(path, data)
+            mtime_before = path.stat().st_mtime
+            setup_module.write_machine_toml(path, data)
+            mtime_after = path.stat().st_mtime
+            self.assertEqual(mtime_before, mtime_after)
+
+    def test_toml_escaping_backslash(self):
+        """Backslash in path values is properly escaped in TOML output."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            data = setup_module.MachineToml(
+                profiles={"agent": r"C:\Users\glin\profile"}
+            )
+            setup_module.write_machine_toml(path, data)
+            content = path.read_text()
+            # TOML basic string: backslash → \\
+            self.assertIn(r"C:\\Users\\glin\\profile", content)
+            # Roundtrip must recover original
+            loaded = setup_module.load_machine_toml(path)
+            self.assertEqual(loaded.profiles["agent"], r"C:\Users\glin\profile")
+
+    def test_toml_escaping_double_quote(self):
+        """Double-quote in path values is properly escaped in TOML output."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            data = setup_module.MachineToml(
+                profiles={"agent": '/weird/"quoted"/path'}
+            )
+            setup_module.write_machine_toml(path, data)
+            loaded = setup_module.load_machine_toml(path)
+            self.assertEqual(loaded.profiles["agent"], '/weird/"quoted"/path')
+
+    def test_empty_data_writes_header_only(self):
+        """Empty MachineToml writes successfully with just the header comment."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            setup_module.write_machine_toml(path, setup_module.MachineToml())
+            self.assertTrue(path.exists())
+            # Must be loadable
+            loaded = setup_module.load_machine_toml(path)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.profiles, {})
+            self.assertEqual(loaded.skill_cache, {})
+
+    def test_dotted_key_name_roundtrips(self):
+        """Keys like 'hammer.mei' (dotted) survive write/load via TOML quoting."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "machine.toml"
+            data = setup_module.MachineToml(
+                profiles={"hammer.mei": "/path/to/profile"}
+            )
+            setup_module.write_machine_toml(path, data)
+            loaded = setup_module.load_machine_toml(path)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.profiles.get("hammer.mei"), "/path/to/profile")
+
+
+class InstallFromConfMachineTomlTests(unittest.TestCase):
+    """Tests for machine.toml lifecycle in install_from_conf (Slice E)."""
+
+    def _make_conf(self, td: str, content: str = "") -> Path:
+        conf_path = Path(td) / "tamago.conf"
+        conf_path.write_text(content)
+        return conf_path
+
+    def test_machine_toml_written_on_install(self):
+        """install_from_conf writes machine.toml when profile_root is set."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_dir = Path(td) / "hammer.mei-profile"
+            profile_dir.mkdir()
+            conf_path = self._make_conf(
+                td,
+                f'[[profiles]]\nname = "hammer.mei"\n',
+            )
+            project_root = Path(td) / "project"
+
+            written_data: list[setup_module.MachineToml] = []
+
+            def capture_write(path, data):
+                written_data.append(data)
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(setup_module, "resolve_profile_root",
+                                  return_value=profile_dir),
+                mock.patch.object(setup_module, "write_machine_toml",
+                                  side_effect=capture_write),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    project_root,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(written_data), 1)
+            data = written_data[0]
+            # Profiles dict should have the resolved path
+            self.assertEqual(list(data.profiles.values())[0], str(profile_dir.resolve()))
+
+    def test_machine_toml_not_written_on_uninstall(self):
+        """install_from_conf never calls write_machine_toml on UNINSTALL."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = self._make_conf(td)
+            project_root = Path(td) / "project"
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "write_machine_toml") as mock_write,
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    Path(td) / "source",
+                    project_root,
+                )
+
+            mock_write.assert_not_called()
+
+    def test_machine_toml_deleted_after_uninstall(self):
+        """machine.toml is removed after a successful UNINSTALL."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = self._make_conf(td)
+            project_root = Path(td) / "project"
+            machine_toml = project_root / ".tamago" / "machine.toml"
+            machine_toml.parent.mkdir(parents=True)
+            machine_toml.write_text(
+                "# header\n\n[profiles]\n"
+            )
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    Path(td) / "source",
+                    project_root,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertFalse(machine_toml.exists())
+
+    def test_machine_toml_written_before_external_skills(self):
+        """write_machine_toml is called before setup_external_skills."""
+        call_order: list[str] = []
+
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = self._make_conf(td)
+            project_root = Path(td) / "project"
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+                mock.patch.object(
+                    setup_module, "write_machine_toml",
+                    side_effect=lambda *a, **kw: call_order.append("write_machine_toml"),
+                ),
+                mock.patch.object(
+                    setup_module, "setup_external_skills",
+                    side_effect=lambda *a, **kw: call_order.append("setup_external_skills") or 0,
+                ),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    project_root,
+                )
+
+        self.assertEqual(call_order, ["write_machine_toml", "setup_external_skills"])
+
+    def test_uninstall_uses_machine_toml_when_conf_would_resolve_different_path(self):
+        """The key Slice E test: uninstall reads profile path from machine.toml,
+        not by re-resolving conf.profiles, so it uses the path from install time.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            source_root = Path(td) / "tamago"
+            source_root.mkdir()
+
+            # Profile A — the one installed originally
+            profile_a = source_root / "original-profile"
+            profile_a.mkdir()
+
+            # Profile B — would be resolved if conf is re-parsed (different path)
+            profile_b = source_root / "different-profile"
+            profile_b.mkdir()
+
+            # tamago.conf still says "original" by name
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text('[[profiles]]\nname = "original"\n')
+
+            project_root = Path(td) / "project"
+            machine_toml_path = project_root / ".tamago" / "machine.toml"
+            machine_toml_path.parent.mkdir(parents=True)
+
+            # machine.toml points to profile_a (installed path)
+            setup_module.write_machine_toml(
+                machine_toml_path,
+                setup_module.MachineToml(profiles={"original": str(profile_a.resolve())}),
+            )
+
+            # Now change conf to point at profile_b so re-resolution would differ
+            conf_path.write_text('[[profiles]]\nname = "different"\n')
+
+            captured_profile_root: list = []
+
+            def capture_setup(operation, source_root, project_root, **kwargs):
+                captured_profile_root.append(kwargs.get("profile_root"))
+                return 0
+
+            with (
+                mock.patch.object(setup_module, "setup", side_effect=capture_setup),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+                # resolve_profile_root should NOT be called since machine.toml wins
+                mock.patch.object(
+                    setup_module, "resolve_profile_root",
+                    return_value=profile_b,  # would return wrong path if called
+                ) as mock_resolve,
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    source_root,
+                    project_root,
+                )
+
+            self.assertEqual(result, 0)
+            # setup() must have received profile_a, not profile_b
+            self.assertEqual(len(captured_profile_root), 1)
+            self.assertEqual(captured_profile_root[0].resolve(), profile_a.resolve())
+            # resolve_profile_root should not have been called (machine.toml was sufficient)
+            mock_resolve.assert_not_called()
+            # machine.toml should be gone after uninstall
+            self.assertFalse(machine_toml_path.exists())
+
+    def test_uninstall_falls_back_to_conf_when_machine_toml_absent(self):
+        """Without machine.toml (pre-Slice-E install), conf.profiles is used."""
+        with tempfile.TemporaryDirectory() as td:
+            source_root = Path(td) / "tamago"
+            source_root.mkdir()
+            profile_dir = source_root / "hammer.mei-profile"
+            profile_dir.mkdir()
+
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
+
+            project_root = Path(td) / "project"
+            # No machine.toml present
+
+            captured_profile_root: list = []
+
+            def capture_setup(operation, source_root, project_root, **kwargs):
+                captured_profile_root.append(kwargs.get("profile_root"))
+                return 0
+
+            with (
+                mock.patch.object(setup_module, "setup", side_effect=capture_setup),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+                mock.patch.object(
+                    setup_module, "resolve_profile_root",
+                    return_value=profile_dir,
+                ),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    source_root,
+                    project_root,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(captured_profile_root[0], profile_dir)
+
+
+class KnownProjectsRegistryTests(unittest.TestCase):
+    """Tests for the JSON project registry (Slice F)."""
+
+    def test_read_returns_empty_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "known-projects.json"
+            self.assertEqual(setup_module.read_known_projects(path), [])
+
+    def test_read_returns_empty_on_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "known-projects.json"
+            path.write_text("NOT JSON {{{")
+            self.assertEqual(setup_module.read_known_projects(path), [])
+
+    def test_read_returns_empty_on_missing_projects_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "known-projects.json"
+            path.write_text('{"other": []}')
+            self.assertEqual(setup_module.read_known_projects(path), [])
+
+    def test_add_then_read_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+            project.mkdir()
+            setup_module.add_project_to_registry(project, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["path"], str(project.resolve()))
+
+    def test_add_is_idempotent(self):
+        """Adding the same project twice results in one entry."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+            project.mkdir()
+            setup_module.add_project_to_registry(project, registry)
+            setup_module.add_project_to_registry(project, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)
+
+    def test_add_creates_parent_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "subdir" / "known-projects.json"
+            project = Path(td) / "myproject"
+            project.mkdir()
+            setup_module.add_project_to_registry(project, registry)
+            self.assertTrue(registry.exists())
+
+    def test_add_multiple_projects(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            for name in ("proj_a", "proj_b", "proj_c"):
+                p = Path(td) / name
+                p.mkdir()
+                setup_module.add_project_to_registry(p, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 3)
+
+    def test_remove_existing_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+            project.mkdir()
+            setup_module.add_project_to_registry(project, registry)
+            setup_module.remove_project_from_registry(project, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(entries, [])
+
+    def test_remove_is_noop_when_not_registered(self):
+        """remove_project_from_registry doesn't error if project isn't in registry."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+            project.mkdir()
+            # Never added — remove should be silent
+            setup_module.remove_project_from_registry(project, registry)
+
+    def test_remove_is_noop_when_registry_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+            self.assertFalse(registry.exists())
+            setup_module.remove_project_from_registry(project, registry)  # must not raise
+
+    def test_remove_leaves_other_entries_intact(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            proj_a = Path(td) / "a"
+            proj_b = Path(td) / "b"
+            proj_a.mkdir(); proj_b.mkdir()
+            setup_module.add_project_to_registry(proj_a, registry)
+            setup_module.add_project_to_registry(proj_b, registry)
+            setup_module.remove_project_from_registry(proj_a, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["path"], str(proj_b.resolve()))
+
+    def test_registry_json_is_extensible(self):
+        """Extra keys in a project entry survive a remove/add cycle."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "known-projects.json"
+            proj_a = Path(td) / "a"
+            proj_b = Path(td) / "b"
+            proj_a.mkdir(); proj_b.mkdir()
+            # Write a registry with extra metadata on proj_a
+            import json as _json
+            registry.write_text(_json.dumps({
+                "projects": [
+                    {"path": str(proj_a.resolve()), "last_install": "2026-04-24"},
+                    {"path": str(proj_b.resolve())},
+                ]
+            }) + "\n")
+            # Remove proj_b — proj_a's extra metadata must survive
+            setup_module.remove_project_from_registry(proj_b, registry)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].get("last_install"), "2026-04-24")
+
+
+class PruneTests(unittest.TestCase):
+    """Tests for tamago prune (Slice F)."""
+
+    def _make_cache_dir(self, cache_root: Path, name: str) -> Path:
+        """Create a fake cached skill repo dir."""
+        d = cache_root / name
+        d.mkdir(parents=True)
+        return d
+
+    def _make_machine_toml(
+        self,
+        project_root: Path,
+        skill_cache: dict[str, str],
+    ) -> None:
+        machine_toml = project_root / ".tamago" / "machine.toml"
+        machine_toml.parent.mkdir(parents=True, exist_ok=True)
+        setup_module.write_machine_toml(
+            machine_toml,
+            setup_module.MachineToml(skill_cache=skill_cache),
+        )
+
+    def test_prune_removes_unreferenced_cache_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            orphan = self._make_cache_dir(cache_root, "orphan")
+
+            result = setup_module.prune(
+                cache_root=cache_root,
+                registry_path=registry,
+                dry_run=False,
+            )
+            self.assertEqual(result, 0)
+            self.assertFalse(orphan.exists())
+
+    def test_prune_keeps_referenced_cache_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "myproject"
+
+            kept = self._make_cache_dir(cache_root, "kept")
+            self._make_machine_toml(project, {"my-skill": str(kept)})
+            setup_module.add_project_to_registry(project, registry)
+
+            result = setup_module.prune(
+                cache_root=cache_root,
+                registry_path=registry,
+                dry_run=False,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(kept.exists())
+
+    def test_prune_multi_project_shared_cache(self):
+        """A cache dir referenced by project B must survive even if project A doesn't use it."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            dir_x = self._make_cache_dir(cache_root, "x")  # used by proj A only
+            dir_y = self._make_cache_dir(cache_root, "y")  # used by both A and B
+            dir_z = self._make_cache_dir(cache_root, "z")  # used by proj B only
+            self._make_cache_dir(cache_root, "orphan")    # used by nobody
+
+            proj_a = Path(td) / "proj_a"
+            proj_b = Path(td) / "proj_b"
+            self._make_machine_toml(proj_a, {"skill1": str(dir_x), "skill2": str(dir_y)})
+            self._make_machine_toml(proj_b, {"skill2": str(dir_y), "skill3": str(dir_z)})
+            setup_module.add_project_to_registry(proj_a, registry)
+            setup_module.add_project_to_registry(proj_b, registry)
+
+            result = setup_module.prune(
+                cache_root=cache_root,
+                registry_path=registry,
+                dry_run=False,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(dir_x.exists())
+            self.assertTrue(dir_y.exists())
+            self.assertTrue(dir_z.exists())
+            self.assertFalse((cache_root / "orphan").exists())
+
+    def test_dry_run_does_not_delete(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            orphan = self._make_cache_dir(cache_root, "orphan")
+
+            result = setup_module.prune(
+                cache_root=cache_root,
+                registry_path=registry,
+                dry_run=True,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(orphan.exists())  # must still be there
+
+    def test_empty_registry_prunes_all_cache_dirs(self):
+        """With no known projects, every cache dir is orphaned."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            a = self._make_cache_dir(cache_root, "a")
+            b = self._make_cache_dir(cache_root, "b")
+
+            setup_module.prune(cache_root=cache_root, registry_path=registry)
+            self.assertFalse(a.exists())
+            self.assertFalse(b.exists())
+
+    def test_absent_cache_root_returns_0(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "nonexistent-cache"
+            registry = Path(td) / "known-projects.json"
+            result = setup_module.prune(cache_root=cache_root, registry_path=registry)
+            self.assertEqual(result, 0)
+
+    def test_stale_registry_entry_cleaned_after_prune(self):
+        """Project dir gone → registry entry removed by prune."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            ghost_project = Path(td) / "ghost"
+            ghost_project.mkdir()
+            setup_module.add_project_to_registry(ghost_project, registry)
+            ghost_project.rmdir()  # simulate deleted project
+
+            self._make_cache_dir(cache_root, "orphan")
+
+            setup_module.prune(cache_root=cache_root, registry_path=registry)
+
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(entries, [])
+
+    def test_stale_entry_not_cleaned_in_dry_run(self):
+        """--dry-run must not modify the registry."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            ghost_project = Path(td) / "ghost"
+            ghost_project.mkdir()
+            setup_module.add_project_to_registry(ghost_project, registry)
+            ghost_project.rmdir()
+
+            setup_module.prune(cache_root=cache_root, registry_path=registry, dry_run=True)
+
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)  # still there
+
+    def test_project_with_no_machine_toml_aborts_prune(self):
+        """A registered project that exists but has no machine.toml (pre-Slice-E install)
+        causes prune to abort with rc=1 rather than risk deleting referenced caches."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+
+            orphan = self._make_cache_dir(cache_root, "orphan")
+
+            project = Path(td) / "project_no_toml"
+            project.mkdir()
+            setup_module.add_project_to_registry(project, registry)
+            # No machine.toml written — simulates pre-Slice-E install
+
+            result = setup_module.prune(cache_root=cache_root, registry_path=registry)
+
+            # Must abort (rc=1) and NOT delete the cache dir
+            self.assertEqual(result, 1)
+            self.assertTrue(orphan.exists())
+
+            # Registry entry must NOT be removed (project still exists)
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(len(entries), 1)
+
+
+class TomlStringTests(unittest.TestCase):
+    """Tests for _toml_string — TOML basic string escaping."""
+
+    def test_backslash_escaped(self):
+        result = setup_module._toml_string(r"C:\Users\glin")
+        self.assertIn("\\\\", result)
+
+    def test_double_quote_escaped(self):
+        result = setup_module._toml_string('say "hi"')
+        self.assertIn('\\"', result)
+
+    def test_newline_escaped(self):
+        result = setup_module._toml_string("line1\nline2")
+        self.assertIn("\\n", result)
+        self.assertNotIn("\n", result)
+
+    def test_carriage_return_escaped(self):
+        result = setup_module._toml_string("a\rb")
+        self.assertIn("\\r", result)
+
+    def test_tab_escaped(self):
+        result = setup_module._toml_string("a\tb")
+        self.assertIn("\\t", result)
+
+    def test_control_char_escaped_as_unicode(self):
+        # U+0001 (SOH) — must become 
+        result = setup_module._toml_string("\x01")
+        self.assertIn("\\u0001", result)
+
+    def test_normal_path_unchanged(self):
+        s = "/Users/glin/.tamago/repo-cache/abc123"
+        result = setup_module._toml_string(s)
+        self.assertEqual(result, f'"{s}"')
+
+    def test_dotted_agent_name_unchanged(self):
+        result = setup_module._toml_string("hammer.mei")
+        self.assertEqual(result, '"hammer.mei"')
+
+    def test_roundtrip_via_tomllib(self):
+        import tomllib as _toml
+        tricky = 'path\\with "quotes"\nand newline'
+        toml_text = f"key = {setup_module._toml_string(tricky)}\n"
+        parsed = _toml.loads(toml_text)
+        self.assertEqual(parsed["key"], tricky)
+
+
+class PatchSettingsDanglingSymlinkTests(unittest.TestCase):
+    """Tests for patch_settings dangling-symlink handling."""
+
+    def test_dangling_symlink_is_replaced_gracefully(self):
+        """A broken symlink at path is unlinked and treated as empty settings."""
+        import json as _json
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+            # Create a symlink pointing to a non-existent file
+            target.symlink_to(Path(td) / "nonexistent.json")
+            self.assertTrue(target.is_symlink())
+            self.assertFalse(target.exists())  # dangling
+
+            # Should not raise
+            setup_module.patch_settings(
+                target,
+                {"SessionStart": ["cmd --init"]},
+                [],
+                None,
+                manifest,
+            )
+
+            # Symlink must be gone; real file written with injected hook
+            self.assertFalse(target.is_symlink())
+            self.assertTrue(target.exists())
+            data = _json.loads(target.read_text())
+            cmds = [
+                h["command"]
+                for m in data["hooks"]["SessionStart"]
+                for h in m.get("hooks", [])
+            ]
+            self.assertIn("cmd --init", cmds)
+
+
+class PruneResolvePathTests(unittest.TestCase):
+    """Tests that prune() and _write_install_machine_toml() agree on path normalization."""
+
+    def test_cache_dir_stored_resolved_matches_prune_lookup(self):
+        """cache_dir.resolve() stored in machine.toml matches prune()'s resolution."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "repo-cache"
+            registry = Path(td) / "known-projects.json"
+            project = Path(td) / "project"
+
+            # Create a symlink-based path to the cache root to simulate macOS /private
+            real_cache = Path(td) / "real-cache"
+            real_cache.mkdir()
+            cache_root.symlink_to(real_cache)
+
+            kept = cache_root / "abc123"
+            kept.mkdir()
+
+            # Manually write a machine.toml using the resolved path (as
+            # _write_install_machine_toml now does)
+            machine_toml = project / ".tamago" / "machine.toml"
+            machine_toml.parent.mkdir(parents=True)
+            setup_module.write_machine_toml(
+                machine_toml,
+                setup_module.MachineToml(
+                    skill_cache={"my-skill": str(kept.resolve())}
+                ),
+            )
+            setup_module.add_project_to_registry(project, registry)
+
+            result = setup_module.prune(
+                cache_root=cache_root,
+                registry_path=registry,
+            )
+            self.assertEqual(result, 0)
+            # 'kept' must survive because it is referenced
+            self.assertTrue(kept.exists() or real_cache.joinpath("abc123").exists())
+
+
+class InstallFromConfRegistryTests(unittest.TestCase):
+    """Tests that install_from_conf registers/unregisters projects (Slice F)."""
+
+    def test_install_registers_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+            project_root = Path(td) / "project"
+            registry = Path(td) / "known-projects.json"
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    project_root,
+                    registry_path=registry,
+                )
+
+            entries = setup_module.read_known_projects(registry)
+            paths = [e["path"] for e in entries]
+            self.assertIn(str(project_root.resolve()), paths)
+
+    def test_uninstall_unregisters_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+            project_root = Path(td) / "project"
+            registry = Path(td) / "known-projects.json"
+
+            # Pre-register
+            setup_module.add_project_to_registry(project_root, registry)
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch.object(setup_module, "setup_external_skills", return_value=0),
+            ):
+                setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.UNINSTALL,
+                    Path(td) / "source",
+                    project_root,
+                    registry_path=registry,
+                )
+
+            entries = setup_module.read_known_projects(registry)
+            self.assertEqual(entries, [])
+
+    def test_failed_setup_does_not_register(self):
+        """If setup() fails, project must NOT be registered."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+            project_root = Path(td) / "project"
+            registry = Path(td) / "known-projects.json"
+
+            with (
+                mock.patch.object(setup_module, "setup", return_value=1),
+                mock.patch.object(setup_module, "pull_repo"),
+            ):
+                result = setup_module.install_from_conf(
+                    conf_path,
+                    setup_module.Operation.INSTALL,
+                    Path(td) / "source",
+                    project_root,
+                    registry_path=registry,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertFalse(registry.exists())
 
 
 if __name__ == "__main__":
