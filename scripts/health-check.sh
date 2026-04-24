@@ -37,25 +37,15 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ─── Profile resolution (mirrors memory-sync.sh 3-step discovery) ────────────
-# 1. Project-scoped machine.env — v2 format, written by `tamago install`
+# ─── Profile resolution (mirrors memory-sync.sh 2-step discovery) ────────────
+# 1. Project-scoped machine.env — written by `tamago install`, shell-sourceable
 PROJECT_ENV="$PROJECT_DIR/.tamago/machine.env"
 if [ -f "$PROJECT_ENV" ]; then
   # shellcheck source=/dev/null
   . "$PROJECT_ENV"
 fi
 
-# 2. Legacy fallback: grep-parse tamago.conf (KEY=VALUE, pre-v2 format)
-if [ -z "${PROFILE_REPO:-}" ]; then
-  PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
-  if [ -f "$PROJECT_CONF" ]; then
-    [ -z "${PROFILE_REPO:-}" ] && \
-      PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
-    MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
-  fi
-fi
-
-# 3. Global fallback: ~/.tamago/machine.env (globally-installed agents)
+# 2. Global fallback: ~/.tamago/machine.env (globally-installed agents)
 if [ -z "${PROFILE_REPO:-}" ]; then
   GLOBAL_ENV="$HOME/.tamago/machine.env"
   if [ -f "$GLOBAL_ENV" ]; then

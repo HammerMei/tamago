@@ -1,47 +1,50 @@
 #!/bin/bash
 # tamago post-merge hook
-# Automatically regenerates merged agent files after `git pull` on tamago.
+# Automatically regenerates agent files after `git pull` on the tamago repo.
 # Installed by: tamago install-global
 #
-# v2 path: if the project has .tamago/tamago.conf, use `tamago install`
-#          (auto-detect).  Falls back to legacy local.conf + --profile-dir.
+# Iterates known-projects.json and runs `tamago install` for each project
+# that has a .tamago/tamago.conf (TOML v2 format).
 
 TAMAGO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-LOCAL_CONF="$TAMAGO_DIR/local.conf"
+KNOWN_PROJECTS="$HOME/.tamago/known-projects.json"
 
-if [ ! -f "$LOCAL_CONF" ]; then
-  exit 0  # no local.conf = tamago not set up for a project yet, nothing to do
+if [ ! -f "$KNOWN_PROJECTS" ]; then
+  exit 0  # no known projects — nothing to do
 fi
 
-PROFILE_REPO=$(grep "^PROFILE_REPO=" "$LOCAL_CONF" 2>/dev/null | cut -d= -f2-)
-PROJECT_DIR=$(grep  "^PROJECT_DIR="  "$LOCAL_CONF" 2>/dev/null | cut -d= -f2-)
+# Parse known-projects.json to get project paths
+PROJECTS=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    for entry in data.get('projects', []):
+        path = entry.get('path', '')
+        if path:
+            print(path)
+except Exception as e:
+    sys.exit(0)
+" "$KNOWN_PROJECTS" 2>/dev/null)
 
-if [ -z "$PROJECT_DIR" ]; then
-  exit 0
-fi
-
-if [ ! -d "$PROJECT_DIR" ]; then
-  echo "🥚 tamago post-merge: PROJECT_DIR not found: $PROJECT_DIR" >&2
+if [ -z "$PROJECTS" ]; then
   exit 0
 fi
 
 echo "🥚 tamago updated — regenerating agent files..."
 
-# v2: project has tamago.conf — use auto-detect path (no --profile needed)
-if [ -f "$PROJECT_DIR/.tamago/tamago.conf" ]; then
-  cd "$PROJECT_DIR" && python3 "$TAMAGO_DIR/setup.py" install
-  exit $?
-fi
-
-# legacy: use PROFILE_REPO from local.conf
-if [ -z "$PROFILE_REPO" ]; then
-  echo "🥚 tamago post-merge: no PROFILE_REPO in local.conf and no tamago.conf found" >&2
-  exit 0
-fi
-
-if [ ! -d "$PROFILE_REPO" ]; then
-  echo "🥚 tamago post-merge: PROFILE_REPO not found: $PROFILE_REPO" >&2
-  exit 0
-fi
-
-cd "$PROJECT_DIR" && python3 "$TAMAGO_DIR/setup.py" install --profile-dir "$PROFILE_REPO"
+while IFS= read -r project_dir; do
+  if [ -z "$project_dir" ]; then
+    continue
+  fi
+  if [ ! -d "$project_dir" ]; then
+    echo "🥚 skipping (not found): $project_dir" >&2
+    continue
+  fi
+  conf="$project_dir/.tamago/tamago.conf"
+  if [ ! -f "$conf" ]; then
+    echo "🥚 skipping (no tamago.conf): $project_dir" >&2
+    continue
+  fi
+  echo "🥚 reinstalling: $project_dir"
+  cd "$project_dir" && python3 "$TAMAGO_DIR/setup.py" install
+done <<< "$PROJECTS"

@@ -191,18 +191,22 @@ class SetupGitignoreTests(unittest.TestCase):
 
             self.assertEqual(
                 gitignore.read_text(),
-                "node_modules\n.claude\n.opencode\n.tamago\n",
+                "node_modules\n.claude\n.opencode\n.tamago/machine.env\n.tamago/machine.toml\n",
             )
 
     def test_install_does_not_duplicate_entries_with_trailing_slash(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text(".claude/\n.opencode/\n.tamago/\n")
+            # File entries with trailing slash (unusual but valid gitignore syntax)
+            gitignore.write_text(".claude/\n.opencode/\n.tamago/machine.env/\n.tamago/machine.toml/\n")
 
             setup_module.setup_gitignore(setup_module.Operation.INSTALL, project_root)
 
-            self.assertEqual(gitignore.read_text(), ".claude/\n.opencode/\n.tamago/\n")
+            self.assertEqual(
+                gitignore.read_text(),
+                ".claude/\n.opencode/\n.tamago/machine.env/\n.tamago/machine.toml/\n",
+            )
 
     def test_install_creates_gitignore_when_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,14 +216,16 @@ class SetupGitignoreTests(unittest.TestCase):
 
             self.assertEqual(
                 (project_root / ".gitignore").read_text(),
-                ".claude\n.opencode\n.tamago\n",
+                ".claude\n.opencode\n.tamago/machine.env\n.tamago/machine.toml\n",
             )
 
     def test_uninstall_removes_managed_entries_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text("node_modules\n.claude\n.opencode\n.tamago\ndist\n")
+            gitignore.write_text(
+                "node_modules\n.claude\n.opencode\n.tamago/machine.env\n.tamago/machine.toml\ndist\n"
+            )
 
             setup_module.setup_gitignore(setup_module.Operation.UNINSTALL, project_root)
 
@@ -229,7 +235,7 @@ class SetupGitignoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             gitignore = project_root / ".gitignore"
-            gitignore.write_text(".claude/\n.opencode/\n.tamago/\n")
+            gitignore.write_text(".claude/\n.opencode/\n.tamago/machine.env/\n.tamago/machine.toml/\n")
 
             setup_module.setup_gitignore(setup_module.Operation.UNINSTALL, project_root)
 
@@ -359,7 +365,14 @@ class ProfileReplaceTests(unittest.TestCase):
         (profile / "settings" / "opencode" / "opencode.json").write_text("{}")
         return profile
 
-    def test_reinstall_with_different_profile_removes_old_agent_files(self):
+    def test_reinstall_with_different_profile_leaves_old_agent_files(self):
+        """Switching profiles via setup() does NOT auto-remove old profile files.
+
+        Tamago no longer reads the old profile path from tamago.conf to clean up
+        stale agents — profile swaps require manual cleanup of old .md files.
+        install_from_conf() handles cross-profile detection via machine.toml,
+        but setup() itself is profile-unaware beyond what it's given.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             source_root, project_root = self._make_minimal_source(temp_dir)
 
@@ -387,13 +400,13 @@ class ProfileReplaceTests(unittest.TestCase):
                     setup_module.Operation.INSTALL, source_root, project_root, profile_b
                 )
 
-            # After second install: hammer.mei artifacts should be gone
-            self.assertFalse((claude_agents / "hammer.mei.md").exists(),
-                             "old agent .md from hammer.mei should have been removed")
-            self.assertFalse((claude_mem / "hammer.mei").is_symlink(),
-                             "old memory symlink for hammer.mei should have been removed")
+            # Old profile files remain — profile swap cleanup is manual.
+            self.assertTrue((claude_agents / "hammer.mei.md").exists(),
+                            "old agent .md is left behind; user must clean up manually")
+            self.assertTrue((claude_mem / "hammer.mei").is_symlink(),
+                            "old memory symlink is left behind; user must clean up manually")
 
-            # New profile's artifacts should be present
+            # New profile's artifacts are present alongside the old ones.
             self.assertTrue((claude_agents / "little.mei.md").exists())
             self.assertTrue((claude_mem / "little.mei").is_symlink())
 
@@ -458,47 +471,51 @@ class ProfileReplaceTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_main_passes_cli_source_to_setup(self):
+    def test_main_passes_cli_source_to_install_from_conf(self):
+        """--source flag is forwarded to install_from_conf as source_root."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "project"
             project.mkdir()
+            # Create a tamago.conf so auto-detect picks it up.
+            tamago_dir = project / ".tamago"
+            tamago_dir.mkdir()
+            (tamago_dir / "tamago.conf").write_text("[settings]\n")
+
             with (
-                mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as ifc_mock,
                 mock.patch("sys.argv", ["setup.py", "install", "--source", temp_dir]),
                 mock.patch.object(setup_module.Path, "cwd", return_value=project),
             ):
                 result = setup_module.main()
 
         self.assertEqual(result, 0)
-        setup_mock.assert_called_once_with(
-            setup_module.Operation.INSTALL,
-            Path(temp_dir),
-            project,     # project_root = mocked cwd
-            None,        # profile_root
-            True,        # memory_sync (default)
-            True,        # tts_enabled (default)
-        )
+        call_args = ifc_mock.call_args
+        # source_root should be Path(temp_dir) — the value passed via --source
+        self.assertEqual(call_args.args[2], Path(temp_dir))
 
     def test_main_accepts_source_before_subcommand(self):
+        """--source may appear before the subcommand — global flag position."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "project"
             project.mkdir()
+            tamago_dir = project / ".tamago"
+            tamago_dir.mkdir()
+            (tamago_dir / "tamago.conf").write_text("[settings]\n")
+
             with (
-                mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as ifc_mock,
                 mock.patch("sys.argv", ["setup.py", "--source", temp_dir, "install"]),
                 mock.patch.object(setup_module.Path, "cwd", return_value=project),
             ):
                 result = setup_module.main()
 
         self.assertEqual(result, 0)
-        setup_mock.assert_called_once_with(
-            setup_module.Operation.INSTALL,
-            Path(temp_dir),
-            project,     # project_root = mocked cwd
-            None,        # profile_root
-            True,        # memory_sync (default)
-            True,        # tts_enabled (default)
-        )
+        call_args = ifc_mock.call_args
+        self.assertEqual(call_args.args[2], Path(temp_dir))
 
     def test_main_returns_error_when_source_root_is_invalid(self):
         missing_root = "/path/that/does/not/exist"
@@ -687,45 +704,6 @@ class MachineEnvTests(unittest.TestCase):
             setup_module.write_machine_env(env_path, profile_repo, "test-agent")
 
             self.assertTrue(env_path.exists())
-
-    def test_write_project_conf_also_writes_machine_env(self):
-        """Integration: write_project_conf must produce both tamago.conf and machine.env."""
-        with tempfile.TemporaryDirectory() as td:
-            project_root = Path(td) / "project"
-            project_root.mkdir()
-            profile_root = Path(td) / "hammer.mei-profile"
-            profile_root.mkdir()
-
-            setup_module.write_project_conf(profile_root, project_root, True, True)
-
-            self.assertTrue((project_root / ".tamago" / "tamago.conf").exists())
-            machine_env = project_root / ".tamago" / "machine.env"
-            self.assertTrue(machine_env.exists())
-            content = machine_env.read_text()
-            self.assertIn(str(profile_root.resolve()), content)
-            self.assertIn("MEMORY_SYNC=1", content)
-            self.assertIn("TTS_ENABLED=1", content)
-
-    def test_write_project_conf_skips_overwrite_if_toml_conf_exists(self):
-        """Legacy write_project_conf must NOT overwrite an existing TOML v2 tamago.conf."""
-        with tempfile.TemporaryDirectory() as td:
-            project_root = Path(td) / "project"
-            project_root.mkdir()
-            profile_root = Path(td) / "hammer.mei-profile"
-            profile_root.mkdir()
-
-            # Write a valid TOML tamago.conf (v2 format)
-            toml_conf = project_root / ".tamago" / "tamago.conf"
-            toml_conf.parent.mkdir(parents=True)
-            toml_content = '[[profiles]]\nname = "hammer.mei"\n'
-            toml_conf.write_text(toml_content)
-
-            # Call the legacy writer — must not overwrite
-            setup_module.write_project_conf(profile_root, project_root, True, True)
-
-            self.assertEqual(toml_conf.read_text(), toml_content, "TOML conf must not be overwritten")
-            # machine.env should still be written
-            self.assertTrue((project_root / ".tamago" / "machine.env").exists())
 
     def test_machine_env_values_are_shell_quoted(self):
         """Values in machine.env must be single-quoted so paths with spaces are safe."""
@@ -1485,29 +1463,6 @@ class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
             self.assertIn("opencode", called)
             self.assertIn("claude", called)
 
-    def test_symlink_opencode_global_no_longer_called_by_setup_global(self):
-        """_symlink_opencode_global must NOT be called by setup_global (replaced by patch)."""
-        with tempfile.TemporaryDirectory() as td:
-            source_root = Path(td) / "tamago"
-            (source_root / "settings" / "claude").mkdir(parents=True)
-            (source_root / "settings" / "opencode").mkdir(parents=True)
-            (source_root / "settings" / "claude" / "settings.json").write_text("{}")
-            (source_root / "settings" / "opencode" / "opencode.json").write_text("{}")
-
-            with (
-                mock.patch.object(setup_module, "patch_global_settings"),
-                mock.patch.object(setup_module, "patch_opencode_global_settings"),
-                mock.patch.object(setup_module, "setup_shell_env"),
-                mock.patch.object(setup_module, "setup_git_hooks"),
-                mock.patch.object(setup_module, "setup_local_bin"),
-                mock.patch.object(
-                    setup_module, "_symlink_opencode_global"
-                ) as mock_symlink,
-            ):
-                setup_module.setup_global(setup_module.Operation.INSTALL, source_root)
-
-            mock_symlink.assert_not_called()
-
 
 class TamagoConfSettingsBlockTests(unittest.TestCase):
     """Tests specifically covering the [settings] block migration in load_tamago_conf."""
@@ -2116,26 +2071,27 @@ class MainUpdateAndConfigTests(unittest.TestCase):
     """Tests for 'tamago update' alias and --config flag routing."""
 
     def test_update_is_alias_for_install(self):
-        """'tamago update' must call setup() just like 'tamago install'."""
+        """'tamago update' routes to install_from_conf with pull_cached_skills=True."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
+            tamago_dir = project / ".tamago"
+            tamago_dir.mkdir()
+            (tamago_dir / "tamago.conf").write_text("[settings]\n")
+
             with (
-                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
                 mock.patch("sys.argv", ["setup.py", "update", "--source", td]),
                 mock.patch.object(setup_module.Path, "cwd", return_value=project),
             ):
                 result = setup_module.main()
 
         self.assertEqual(result, 0)
-        mock_setup.assert_called_once_with(
-            setup_module.Operation.INSTALL,
-            Path(td),
-            project,
-            None,   # profile_root
-            True,   # memory_sync
-            True,   # tts_enabled
-        )
+        call_kwargs = mock_ifc.call_args.kwargs
+        # update alias sets pull_cached_skills=True to pull URL-sourced skill repos.
+        self.assertTrue(call_kwargs.get("pull_cached_skills", False))
 
     def test_install_config_flag_routes_to_install_from_conf(self):
         """'tamago install --config path/to/tamago.conf' calls install_from_conf."""
