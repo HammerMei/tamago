@@ -37,17 +37,35 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ─── Profile resolution (project-scoped conf only — no global fallback) ───────
-# Presence of .tamago/tamago.conf is the canonical signal that a project has a
-# tamago agent installed.  Without it, profile checks are skipped.
-
-PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
-if [ -f "$PROJECT_CONF" ]; then
-  [ -z "${PROFILE_REPO:-}" ] && \
-    PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
-  MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+# ─── Profile resolution (mirrors memory-sync.sh 3-step discovery) ────────────
+# 1. Project-scoped machine.env — v2 format, written by `tamago install`
+PROJECT_ENV="$PROJECT_DIR/.tamago/machine.env"
+if [ -f "$PROJECT_ENV" ]; then
+  # shellcheck source=/dev/null
+  . "$PROJECT_ENV"
 fi
+
+# 2. Legacy fallback: grep-parse tamago.conf (KEY=VALUE, pre-v2 format)
+if [ -z "${PROFILE_REPO:-}" ]; then
+  PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
+  if [ -f "$PROJECT_CONF" ]; then
+    [ -z "${PROFILE_REPO:-}" ] && \
+      PROFILE_REPO=$(grep "^PROFILE_REPO=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+    MEMORY_SYNC=$(grep "^MEMORY_SYNC=" "$PROJECT_CONF" 2>/dev/null | cut -d= -f2-)
+  fi
+fi
+
+# 3. Global fallback: ~/.tamago/machine.env (globally-installed agents)
+if [ -z "${PROFILE_REPO:-}" ]; then
+  GLOBAL_ENV="$HOME/.tamago/machine.env"
+  if [ -f "$GLOBAL_ENV" ]; then
+    # shellcheck source=/dev/null
+    . "$GLOBAL_ENV"
+  fi
+fi
+
 PROFILE_REPO="${PROFILE_REPO:-$REPO}"
+PROJECT_CONF="$PROJECT_DIR/.tamago/tamago.conf"
 
 # Whether a separate profile repo is configured
 if [ "$PROFILE_REPO" != "$REPO" ]; then
@@ -141,6 +159,19 @@ check_symlink() {
   fi
 }
 
+# For patch+merge files (global Claude/OpenCode settings) — existence of the
+# tamago manifest is the signal that tamago manages the file.
+check_patched() {
+  local path="$1" manifest="$2" name="$3"
+  if [ -f "$manifest" ]; then
+    pass "$name" "patched ✓"
+  elif [ -f "$path" ]; then
+    warn "$name" "exists but no tamago manifest — run: tamago install-global"
+  else
+    fail "$name" "missing — run: tamago install-global"
+  fi
+}
+
 # For merged/generated agent files (not symlinks — written by setup.py)
 check_generated() {
   local file="$1" name="$2"
@@ -215,8 +246,8 @@ section "2. Repos & Paths"
 
 if [ "$HAS_PROFILE" = true ]; then
   [ -f "$PROJECT_CONF" ] \
-    && pass "tamago.conf" "PROFILE_REPO=$(grep '^PROFILE_REPO=' "$PROJECT_CONF" | cut -d= -f2-)" \
-    || warn "tamago.conf" "missing — run: setup.py install --profile <profile>"
+    && pass "tamago.conf" "$PROJECT_CONF" \
+    || warn "tamago.conf" "missing — run: tamago install"
 else
   pass "tamago.conf" "no profile configured — skipping"
 fi
@@ -235,11 +266,12 @@ else
   warn "memory dir" "no agent name in profile settings — skipping"
 fi
 
-# ─── 3. Global Symlinks ───────────────────────────────────────────────────────
+# ─── 3. Global Settings (patch+merge — not symlinks) ─────────────────────────
 
-section "3. Global Symlinks"
+section "3. Global Settings"
 
-check_symlink "$HOME/.claude/settings.json"  "~/.claude/settings.json"
+check_patched "$HOME/.claude/settings.json"      "$HOME/.claude/.tamago-manifest.json"    "~/.claude/settings.json"
+check_patched "$HOME/.opencode/opencode.json"    "$HOME/.opencode/.tamago-manifest.json"  "~/.opencode/opencode.json"
 
 # ─── 4. Project Symlinks ──────────────────────────────────────────────────────
 
@@ -249,6 +281,20 @@ if [ -d "$PROJECT_DIR" ]; then
   check_symlink "$PROJECT_DIR/.claude/settings.json"         ".claude/settings.json"
   check_symlink "$PROJECT_DIR/.claude/skills/text-to-speech" ".claude/skills/text-to-speech"
   check_symlink "$PROJECT_DIR/.opencode/opencode.json"       ".opencode/opencode.json"
+
+  # machine.env — v2 shell bridge, written by `tamago install`
+  if [ -f "$PROJECT_DIR/.tamago/machine.env" ]; then
+    pass ".tamago/machine.env" "present"
+  else
+    fail ".tamago/machine.env" "missing — run: tamago install"
+  fi
+
+  # machine.toml — install-time state (Slice E); warn only (pre-Slice-E installs lack it)
+  if [ -f "$PROJECT_DIR/.tamago/machine.toml" ]; then
+    pass ".tamago/machine.toml" "present"
+  else
+    warn ".tamago/machine.toml" "missing — re-run: tamago install  (pre-Slice-E install)"
+  fi
 
   # Check profile-specific skills (if profile has a skills/ dir)
   if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
