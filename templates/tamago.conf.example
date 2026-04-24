@@ -1,0 +1,57 @@
+# tamago.conf — project agent configuration (TOML format)
+# Copy to <project>/.tamago/tamago.conf and edit to match your setup.
+#
+# Run `tamago install` from the project root after creating this file.
+# tamago will auto-detect it — no --config flag needed.
+
+# ── Profile ────────────────────────────────────────────────────────────────────
+# Exactly one [[profiles]] entry is supported.
+# name  — profile directory name under your profile repo  (required)
+# repo  — absolute path or git URL to the profile repo    (optional)
+#         If omitted, tamago looks for the profile under ~/.tamago/<name>-profile
+#         or under the tamago repo itself.
+
+[[profiles]]
+name = "hammer.mei"
+# repo = "/Users/yourname/.tamago/hammer.mei-profile"   # local path
+# repo = "git@github.com:you/hammer.mei-profile.git"    # git URL
+
+# ── Agents ─────────────────────────────────────────────────────────────────────
+# Agents to install into this project.
+# name   — agent name (must match a persona file in the profile)
+# source — "profile" (from profile repo) or "tamago" (built-in)  [default: tamago]
+# scope  — "project" (per-project) or "global" (home-level)      [default: project]
+# tts    — generate TTS-enabled agent file                        [default: true]
+# memory — wire up agent-memory symlinks                          [default: true]
+
+[[agents]]
+name   = "hammer.mei"
+source = "profile"
+scope  = "project"
+tts    = true
+memory = true
+
+# ── Skills ─────────────────────────────────────────────────────────────────────
+# Skills to symlink into this project.
+# name   — skill directory name
+# source — "tamago" (built-in) or "profile" (from profile/skills/) [default: tamago]
+# scope  — "project" only (global skills not yet supported)        [default: global — warn]
+# path   — override path (for source = "url" skills)               [optional]
+
+[[skills]]
+name   = "text-to-speech"
+source = "tamago"
+scope  = "project"
+
+# Example: URL-sourced external skill
+# [[skills]]
+# name   = "my-tool"
+# source = "https://github.com/you/my-tool-skill.git"
+# scope  = "project"
+
+# ── Settings ───────────────────────────────────────────────────────────────────
+# memory_sync — enable git-based memory sync across machines [default: true]
+#               Set to false for offline/air-gapped setups.
+
+[settings]
+memory_sync = true
