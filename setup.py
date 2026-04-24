@@ -1936,9 +1936,17 @@ def main() -> int:
         return setup_global(Operation.UNINSTALL, source_root)
 
     # v2 path: tamago.conf --config flag routes to install_from_conf, bypassing all
-    # legacy profile/tts/memory-sync flags.  Auto-detection of ./tamago.conf is
-    # intentionally NOT implemented yet (Slice D).
+    # legacy profile/tts/memory-sync flags.  Auto-detect .tamago/tamago.conf when
+    # --config is not given so plain `tamago install` works in a v2 project.
     config_path = getattr(args, "config", None)
+    if config_path is None and args.command in (
+        Operation.INSTALL.value,
+        Operation.UNINSTALL.value,
+    ):
+        auto = project_root / ".tamago" / PROJECT_CONF_NAME
+        if auto.exists():
+            config_path = str(auto)
+            print(f"info    auto-detected config: {auto}")
     if config_path is not None and args.command in (
         Operation.INSTALL.value,
         Operation.UNINSTALL.value,

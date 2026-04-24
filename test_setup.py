@@ -459,36 +459,42 @@ class ProfileReplaceTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def test_main_passes_cli_source_to_setup(self):
-        with (
-            tempfile.TemporaryDirectory() as temp_dir,
-            mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
-            mock.patch("sys.argv", ["setup.py", "install", "--source", temp_dir]),
-        ):
-            result = setup_module.main()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "project"
+            project.mkdir()
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
+                mock.patch("sys.argv", ["setup.py", "install", "--source", temp_dir]),
+                mock.patch.object(setup_module.Path, "cwd", return_value=project),
+            ):
+                result = setup_module.main()
 
         self.assertEqual(result, 0)
         setup_mock.assert_called_once_with(
             setup_module.Operation.INSTALL,
             Path(temp_dir),
-            Path.cwd(),  # project_root = Path.cwd()
+            project,     # project_root = mocked cwd
             None,        # profile_root
             True,        # memory_sync (default)
             True,        # tts_enabled (default)
         )
 
     def test_main_accepts_source_before_subcommand(self):
-        with (
-            tempfile.TemporaryDirectory() as temp_dir,
-            mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
-            mock.patch("sys.argv", ["setup.py", "--source", temp_dir, "install"]),
-        ):
-            result = setup_module.main()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "project"
+            project.mkdir()
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as setup_mock,
+                mock.patch("sys.argv", ["setup.py", "--source", temp_dir, "install"]),
+                mock.patch.object(setup_module.Path, "cwd", return_value=project),
+            ):
+                result = setup_module.main()
 
         self.assertEqual(result, 0)
         setup_mock.assert_called_once_with(
             setup_module.Operation.INSTALL,
             Path(temp_dir),
-            Path.cwd(),  # project_root = Path.cwd()
+            project,     # project_root = mocked cwd
             None,        # profile_root
             True,        # memory_sync (default)
             True,        # tts_enabled (default)
@@ -2090,18 +2096,21 @@ class MainUpdateAndConfigTests(unittest.TestCase):
 
     def test_update_is_alias_for_install(self):
         """'tamago update' must call setup() just like 'tamago install'."""
-        with (
-            tempfile.TemporaryDirectory() as td,
-            mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
-            mock.patch("sys.argv", ["setup.py", "update", "--source", td]),
-        ):
-            result = setup_module.main()
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            with (
+                mock.patch.object(setup_module, "setup", return_value=0) as mock_setup,
+                mock.patch("sys.argv", ["setup.py", "update", "--source", td]),
+                mock.patch.object(setup_module.Path, "cwd", return_value=project),
+            ):
+                result = setup_module.main()
 
         self.assertEqual(result, 0)
         mock_setup.assert_called_once_with(
             setup_module.Operation.INSTALL,
             Path(td),
-            Path.cwd(),
+            project,
             None,   # profile_root
             True,   # memory_sync
             True,   # tts_enabled
@@ -2191,6 +2200,46 @@ class MainUpdateAndConfigTests(unittest.TestCase):
                 setup_module.main()
 
         self.assertTrue(mock_ifc.call_args.kwargs["pull_cached_skills"])
+
+    def test_install_auto_detects_tamago_conf(self):
+        """'tamago install' without --config auto-detects .tamago/tamago.conf in CWD."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            tamago_dir = project / ".tamago"
+            tamago_dir.mkdir(parents=True)
+            conf_path = tamago_dir / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch("sys.argv", ["setup.py", "install", "--source", td]),
+                mock.patch.object(setup_module.Path, "cwd", return_value=project),
+            ):
+                result = setup_module.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(mock_ifc.called, "install_from_conf should be called via auto-detect")
+        self.assertEqual(mock_ifc.call_args.args[0], conf_path)
+
+    def test_install_no_auto_detect_when_conf_absent(self):
+        """'tamago install' without --config falls through to legacy path when no tamago.conf."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+
+            with (
+                mock.patch.object(
+                    setup_module, "install_from_conf", return_value=0
+                ) as mock_ifc,
+                mock.patch.object(setup_module, "setup", return_value=0),
+                mock.patch("sys.argv", ["setup.py", "install", "--source", td]),
+                mock.patch.object(setup_module.Path, "cwd", return_value=project),
+            ):
+                setup_module.main()
+
+        self.assertFalse(mock_ifc.called, "install_from_conf should NOT be called — no tamago.conf")
 
 
 class InstallFromConfExternalSkillsTests(unittest.TestCase):
