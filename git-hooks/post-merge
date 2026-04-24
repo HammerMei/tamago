@@ -1,9 +1,10 @@
 #!/bin/bash
 # tamago post-merge hook
 # Automatically regenerates merged agent files after `git pull` on tamago.
-# Installed by: python3 setup.py install-global
+# Installed by: tamago install-global
 #
-# Reads PROJECT_DIR and PROFILE_REPO from local.conf (written by setup.py install).
+# v2 path: if the project has .tamago/tamago.conf, use `tamago install`
+#          (auto-detect).  Falls back to legacy local.conf + --profile-dir.
 
 TAMAGO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 LOCAL_CONF="$TAMAGO_DIR/local.conf"
@@ -15,12 +16,7 @@ fi
 PROFILE_REPO=$(grep "^PROFILE_REPO=" "$LOCAL_CONF" 2>/dev/null | cut -d= -f2-)
 PROJECT_DIR=$(grep  "^PROJECT_DIR="  "$LOCAL_CONF" 2>/dev/null | cut -d= -f2-)
 
-if [ -z "$PROFILE_REPO" ] || [ -z "$PROJECT_DIR" ]; then
-  exit 0
-fi
-
-if [ ! -d "$PROFILE_REPO" ]; then
-  echo "🥚 tamago post-merge: PROFILE_REPO not found: $PROFILE_REPO" >&2
+if [ -z "$PROJECT_DIR" ]; then
   exit 0
 fi
 
@@ -30,4 +26,22 @@ if [ ! -d "$PROJECT_DIR" ]; then
 fi
 
 echo "🥚 tamago updated — regenerating agent files..."
-cd "$PROJECT_DIR" && python3 "$TAMAGO_DIR/setup.py" install --profile "$PROFILE_REPO"
+
+# v2: project has tamago.conf — use auto-detect path (no --profile needed)
+if [ -f "$PROJECT_DIR/.tamago/tamago.conf" ]; then
+  cd "$PROJECT_DIR" && python3 "$TAMAGO_DIR/setup.py" install
+  exit $?
+fi
+
+# legacy: use PROFILE_REPO from local.conf
+if [ -z "$PROFILE_REPO" ]; then
+  echo "🥚 tamago post-merge: no PROFILE_REPO in local.conf and no tamago.conf found" >&2
+  exit 0
+fi
+
+if [ ! -d "$PROFILE_REPO" ]; then
+  echo "🥚 tamago post-merge: PROFILE_REPO not found: $PROFILE_REPO" >&2
+  exit 0
+fi
+
+cd "$PROJECT_DIR" && python3 "$TAMAGO_DIR/setup.py" install --profile-dir "$PROFILE_REPO"
