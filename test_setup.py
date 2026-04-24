@@ -706,6 +706,27 @@ class MachineEnvTests(unittest.TestCase):
             self.assertIn("MEMORY_SYNC=1", content)
             self.assertIn("TTS_ENABLED=1", content)
 
+    def test_write_project_conf_skips_overwrite_if_toml_conf_exists(self):
+        """Legacy write_project_conf must NOT overwrite an existing TOML v2 tamago.conf."""
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "project"
+            project_root.mkdir()
+            profile_root = Path(td) / "hammer.mei-profile"
+            profile_root.mkdir()
+
+            # Write a valid TOML tamago.conf (v2 format)
+            toml_conf = project_root / ".tamago" / "tamago.conf"
+            toml_conf.parent.mkdir(parents=True)
+            toml_content = '[[profiles]]\nname = "hammer.mei"\n'
+            toml_conf.write_text(toml_content)
+
+            # Call the legacy writer — must not overwrite
+            setup_module.write_project_conf(profile_root, project_root, True, True)
+
+            self.assertEqual(toml_conf.read_text(), toml_content, "TOML conf must not be overwritten")
+            # machine.env should still be written
+            self.assertTrue((project_root / ".tamago" / "machine.env").exists())
+
     def test_machine_env_values_are_shell_quoted(self):
         """Values in machine.env must be single-quoted so paths with spaces are safe."""
         with tempfile.TemporaryDirectory() as td:

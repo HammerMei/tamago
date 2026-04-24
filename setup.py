@@ -434,6 +434,14 @@ def write_project_conf(
             print(f"removed {project_conf}")
         write_machine_env(machine_env, None, "")
         return
+    # If a valid TOML tamago.conf already exists (v2 format), don't overwrite it
+    # with the legacy KEY=VALUE format.  machine.env is still written/updated so
+    # memory-sync.sh always has a fresh shell-sourceable bridge.
+    if project_conf.exists() and load_tamago_conf(project_conf) is not None:
+        print(f"exists  {project_conf} (TOML v2 — skipping legacy overwrite)")
+        agent_name = _detect_agent_name(profile_root)
+        write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
+        return
     lines = [f"PROFILE_REPO={profile_root.resolve()}"]
     if not memory_sync:
         lines.append("MEMORY_SYNC=0")
