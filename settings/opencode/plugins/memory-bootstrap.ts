@@ -49,6 +49,57 @@ async function info(client: Parameters<Plugin>[0]["client"], message: string, ex
   });
 }
 
+function syncScript(): string {
+  const repo = process.env.ASSISTANT_SETUP_REPO ?? path.join(os.homedir(), ".tamago");
+  return path.join(repo, "scripts", "memory-sync.sh");
+}
+
+function syncEnabled(): boolean {
+  return process.env.LAOMEI_MEMORY_SYNC !== "0";
+}
+
+async function runInit(client: Parameters<Plugin>[0]["client"], sessionID: string): Promise<void> {
+  if (!syncEnabled()) return;
+  try {
+    await execFileAsync(syncScript(), ["--init", "opencode"]);
+    await info(client, "Session init completed", { sessionID });
+  } catch (error: any) {
+    await warn(client, "Session init failed (non-fatal)", {
+      sessionID,
+      code: error?.code,
+      message: error?.message,
+    });
+  }
+}
+
+async function runPull(client: Parameters<Plugin>[0]["client"], sessionID: string): Promise<void> {
+  if (!syncEnabled()) return;
+  try {
+    await execFileAsync(syncScript(), ["--pull"]);
+    await info(client, "Memory pull completed", { sessionID });
+  } catch (error: any) {
+    await warn(client, "Memory pull failed (non-fatal)", {
+      sessionID,
+      code: error?.code,
+      message: error?.message,
+    });
+  }
+}
+
+async function runPush(client: Parameters<Plugin>[0]["client"], sessionID: string): Promise<void> {
+  if (!syncEnabled()) return;
+  try {
+    await execFileAsync(syncScript(), ["--push"]);
+    await info(client, "Memory push completed", { sessionID });
+  } catch (error: any) {
+    await warn(client, "Memory push failed (non-fatal)", {
+      sessionID,
+      code: error?.code,
+      message: error?.message,
+    });
+  }
+}
+
 async function loadMemoryIndex(
   client: Parameters<Plugin>[0]["client"],
   root: string,
@@ -99,26 +150,14 @@ async function loadMemoryIndex(
   }
 }
 
-async function runSessionInit(client: Parameters<Plugin>[0]["client"], sessionID: string): Promise<void> {
-  if (process.env.LAOMEI_MEMORY_SYNC === "0") return;
-  const repo = process.env.ASSISTANT_SETUP_REPO ?? path.join(os.homedir(), ".tamago");
-  const scriptPath = path.join(repo, "scripts", "memory-sync.sh");
-  try {
-    await execFileAsync(scriptPath, ["--init", "opencode"]);
-    await info(client, "Session init completed", { sessionID });
-  } catch (error: any) {
-    await warn(client, "Session init failed (non-fatal)", {
-      sessionID,
-      code: error?.code,
-      message: error?.message,
-    });
-  }
-}
-
 export const MemoryBootstrapPlugin: Plugin = async ({ client, directory, worktree }) => {
   const sessionAgents = new Map<string, string>();
   const warnedSessions = new Set<string>();
   const initializedSessions = new Set<string>();
+  // Tracks messageIDs for which --push has already been called.
+  // experimental.text.complete can fire multiple times per message (one per
+  // text part); deduplication ensures we push at most once per assistant turn.
+  const pushedMessages = new Set<string>();
 
   return {
     "chat.message": async (input, output) => {
@@ -134,10 +173,26 @@ export const MemoryBootstrapPlugin: Plugin = async ({ client, directory, worktre
         sessionAgents.set(input.sessionID, agentName);
       }
 
-      // Session init — run once per session (first message only)
-      if (input.sessionID && !initializedSessions.has(input.sessionID)) {
+      if (!initializedSessions.has(input.sessionID)) {
+        // First turn: bootstrap env dir + visited log.
         initializedSessions.add(input.sessionID);
-        await runSessionInit(client, input.sessionID);
+        await runInit(client, input.sessionID);
+      }
+
+      // Pull latest memory before the LLM sees this user message.
+      await runPull(client, input.sessionID);
+    },
+
+    // experimental.text.complete fires when a text part finishes streaming.
+    // We use it as the OpenCode equivalent of Claude Code's Stop hook — push
+    // memory changes to remote after each assistant turn.
+    // Deduplication by messageID prevents double-pushes when a single assistant
+    // turn produces multiple text parts.
+    "experimental.text.complete": async (input) => {
+      const { sessionID, messageID } = input;
+      if (!pushedMessages.has(messageID)) {
+        pushedMessages.add(messageID);
+        await runPush(client, sessionID);
       }
     },
 
