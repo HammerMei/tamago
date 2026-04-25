@@ -3346,6 +3346,228 @@ class GlobalAgentScopeTests(unittest.TestCase):
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
 
 
+HEALTH_CHECK_SH = Path(__file__).with_name("scripts") / "health-check.sh"
+
+
+def _run_health_check(project_dir: Path, tamago_dir: Path, home_dir: Path,
+                      profile_dir: Path | None = None,
+                      extra_env: dict | None = None) -> dict:
+    """Run health-check.sh --json in a subprocess with a faked environment.
+
+    Returns the parsed JSON output dict.
+    """
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["ASSISTANT_SETUP_REPO"] = str(tamago_dir)
+    env.pop("PROFILE_REPO", None)
+    env.pop("MEMORY_SYNC", None)
+    if profile_dir:
+        env["PROFILE_REPO"] = str(profile_dir)
+    if extra_env:
+        env.update(extra_env)
+
+    result = subprocess.run(
+        ["bash", str(HEALTH_CHECK_SH), "--json", "--project", str(project_dir)],
+        capture_output=True, text=True, env=env,
+    )
+    import json
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError(
+            f"health-check.sh did not emit valid JSON.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+
+
+def _skill_result(data: dict, name: str) -> str | None:
+    """Return the status ('pass', 'fail', 'warn') for the named skill check, or None if not found."""
+    for r in data.get("results", []):
+        if name in r.get("name", ""):
+            return r["status"]
+    return None
+
+
+class HealthCheckSkillScopeTests(unittest.TestCase):
+    """Verify health-check.sh correctly locates skills based on source + agent scope.
+
+    Scope rules under test:
+      1. Tamago built-in skills always at ~/.claude/skills/ (even with project-scoped agent)
+      2. Profile skills follow agent scope:
+           global agent  → ~/.claude/skills/
+           project agent → project/.claude/skills/
+      3. explicit scope="project" in [[skills]] → project level regardless of source
+    """
+
+    def _setup_env(self, root: Path, tamago_skills: list[str], profile_skills: list[str],
+                   agent_scope: str = "project", agent_name: str = "test-agent",
+                   project_scoped_skills: list[str] | None = None) -> tuple[Path, Path, Path, Path]:
+        """Build a fake tamago/profile/home/project tree and return (tamago, profile, home, project)."""
+        tamago = root / "tamago"
+        profile = root / "profile"
+        home = root / "home"
+        project = root / "project"
+
+        # tamago skill dirs
+        for name in tamago_skills:
+            (tamago / "skills" / name).mkdir(parents=True)
+
+        # profile skills + minimal settings.json with agent name
+        (profile / "skills").mkdir(parents=True)
+        for name in profile_skills:
+            (profile / "skills" / name).mkdir(parents=True)
+        (profile / "settings" / "claude").mkdir(parents=True)
+        import json
+        (profile / "settings" / "claude" / "settings.json").write_text(
+            json.dumps({"agent": agent_name})
+        )
+
+        # tamago.conf in project
+        (project / ".tamago").mkdir(parents=True)
+        scoped_lines = ""
+        if project_scoped_skills:
+            for s in project_scoped_skills:
+                scoped_lines += f'\n[[skills]]\nname = "{s}"\nscope = "project"\n'
+        (project / ".tamago" / "tamago.conf").write_text(
+            f'[[agents]]\nname = "{agent_name}"\nscope = "{agent_scope}"\n{scoped_lines}'
+        )
+        # machine.env so health check knows the profile
+        (project / ".tamago" / "machine.env").write_text(
+            f'PROFILE_REPO="{profile}"\n'
+        )
+        # machine.toml (avoid warn)
+        (project / ".tamago" / "machine.toml").write_text("")
+
+        # minimal project settings to avoid unrelated failures
+        (project / ".claude").mkdir(parents=True)
+        (project / ".opencode").mkdir(parents=True)
+        (project / ".claude" / "settings.json").symlink_to(
+            tamago / "settings" / "claude" / "settings.json"
+        )
+        (project / ".opencode" / "opencode.json").symlink_to(
+            tamago / "settings" / "opencode" / "opencode.json"
+        )
+        (tamago / "settings" / "claude").mkdir(parents=True)
+        (tamago / "settings" / "claude" / "settings.json").write_text("{}")
+        (tamago / "settings" / "opencode").mkdir(parents=True)
+        (tamago / "settings" / "opencode" / "opencode.json").write_text("{}")
+        # fake tamago-manifest so global settings check passes
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / ".tamago-manifest.json").write_text("{}")
+        (home / ".opencode").mkdir(parents=True)
+        (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+        # profile memory dir
+        (profile / "agents" / "memory" / agent_name).mkdir(parents=True)
+        (project / ".claude" / "agent-memory").mkdir(parents=True)
+
+        return tamago, profile, home, project
+
+    def _install_skill_global(self, home: Path, skill_name: str, source_dir: Path) -> None:
+        skills_dir = home / ".claude" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / skill_name).symlink_to(source_dir)
+
+    def _install_skill_project(self, project: Path, skill_name: str, source_dir: Path) -> None:
+        skills_dir = project / ".claude" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / skill_name).symlink_to(source_dir)
+
+    def test_tamago_builtin_checked_globally_with_project_scoped_agent(self):
+        """Health check looks in ~/.claude/skills/ for tamago built-ins even when agent is project-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=["tts"], profile_skills=[], agent_scope="project"
+            )
+            # Correctly installed: tamago built-in at global scope
+            self._install_skill_global(home, "tts", tamago / "skills" / "tts")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "tts"), "pass",
+                             f"Expected tts to pass; full results: {data['results']}")
+
+    def test_tamago_builtin_fails_if_only_at_project_level(self):
+        """Health check fails for tamago built-ins placed at project level (wrong location)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=["tts"], profile_skills=[], agent_scope="project"
+            )
+            # Wrongly installed at project level — should be at global
+            self._install_skill_project(project, "tts", tamago / "skills" / "tts")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "tts"), "fail",
+                             f"Expected tts to fail (wrong location); full results: {data['results']}")
+
+    def test_profile_skill_checked_at_project_level_with_project_scoped_agent(self):
+        """Health check looks in project/.claude/skills/ for profile skills when agent is project-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=["agent-skill"], agent_scope="project"
+            )
+            # Correctly installed at project level
+            self._install_skill_project(project, "agent-skill", profile / "skills" / "agent-skill")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "agent-skill"), "pass",
+                             f"Expected agent-skill to pass; full results: {data['results']}")
+
+    def test_profile_skill_fails_if_at_global_level_with_project_scoped_agent(self):
+        """Health check fails for profile skills at global when agent is project-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=["agent-skill"], agent_scope="project"
+            )
+            # Wrongly installed at global — should be at project
+            self._install_skill_global(home, "agent-skill", profile / "skills" / "agent-skill")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "agent-skill"), "fail",
+                             f"Expected agent-skill to fail (wrong location); full results: {data['results']}")
+
+    def test_profile_skill_checked_globally_with_global_agent(self):
+        """Health check looks in ~/.claude/skills/ for profile skills when agent is global-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=["agent-skill"], agent_scope="global",
+                agent_name="test-agent",
+            )
+            # Need agent file at global location for global agent check
+            (home / ".claude" / "agents").mkdir(parents=True)
+            agent_md = home / ".claude" / "agents" / "test-agent.md"
+            agent_md.write_text("<!-- TAMAGO GENERATED -->\n")
+            (home / ".opencode" / "agents").mkdir(parents=True)
+            (home / ".opencode" / "agents" / "test-agent.md").write_text("<!-- TAMAGO GENERATED -->\n")
+            (home / ".claude" / "agent-memory").mkdir(parents=True)
+            (home / ".claude" / "agent-memory" / "test-agent").symlink_to(
+                profile / "agents" / "memory" / "test-agent"
+            )
+
+            self._install_skill_global(home, "agent-skill", profile / "skills" / "agent-skill")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "agent-skill"), "pass",
+                             f"Expected agent-skill to pass; full results: {data['results']}")
+
+    def test_explicit_project_scope_override_for_tamago_builtin(self):
+        """scope='project' in [[skills]] makes health check look at project dir for tamago built-ins."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=["tts"], profile_skills=[], agent_scope="project",
+                project_scoped_skills=["tts"],
+            )
+            # Correctly installed at project level due to explicit override
+            self._install_skill_project(project, "tts", tamago / "skills" / "tts")
+
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "tts"), "pass",
+                             f"Expected tts to pass at project level; full results: {data['results']}")
+
+
 class SkillScopeRoutingTests(unittest.TestCase):
     """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
 

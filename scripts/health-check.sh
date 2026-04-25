@@ -305,14 +305,18 @@ if [ -d "$PROJECT_DIR" ]; then
     warn ".tamago/machine.toml" "missing — re-run: tamago install  (pre-Slice-E install)"
   fi
 
-  # Check skills — location depends on agent scope:
-  #   global agent  → ~/.claude/skills/ by default; scope="project" in conf → project dir
-  #   project agent → project dir always
+  # Check skills — location depends on skill source and agent scope:
+  #   tamago built-in skills (tamago/skills/) → ~/.claude/skills/ always (global by default)
+  #   profile skills (profile/skills/)        → follows agent scope:
+  #       global agent  → ~/.claude/skills/
+  #       project agent → project/.claude/skills/
+  #   explicit scope="project" in [[skills]]  → project dir (overrides defaults above)
+  #   when a profile skill shadows a tamago built-in, profile routing rules apply
   if [ -d "$REPO/skills" ] || { [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; }; then
 
-    # Read project-scoped skill overrides from tamago.conf (only relevant for global agents)
+    # Read project-scoped skill overrides from tamago.conf (applies to all agent scopes)
     PROJECT_SCOPED_SKILLS=()
-    if [ "$AGENT_SCOPE" = "global" ] && [ -f "$PROJECT_CONF" ]; then
+    if [ -f "$PROJECT_CONF" ]; then
       _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
 import sys, tomllib
 with open(sys.argv[1], 'rb') as f:
@@ -337,28 +341,58 @@ PY
       return 1
     }
 
-    _check_skill() {
-      local _name="$1"
-      if [ "$AGENT_SCOPE" = "global" ] && ! _is_project_scoped "$_name"; then
-        check_symlink "$HOME/.claude/skills/$_name" "~/.claude/skills/$_name"
-      else
-        check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
-      fi
-    }
-
-    # Check tamago built-in skills
-    if [ -d "$REPO/skills" ]; then
-      for _skill_dir in "$REPO/skills"/*/; do
-        [ -d "$_skill_dir" ] || continue
-        _check_skill "$(basename "$_skill_dir")"
+    # Collect profile skill names (to detect when a profile skill shadows a tamago built-in)
+    PROFILE_SKILL_NAMES=()
+    if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
+      for _d in "$PROFILE_REPO/skills"/*/; do
+        [ -d "$_d" ] && PROFILE_SKILL_NAMES+=("$(basename "$_d")")
       done
     fi
 
-    # Check profile-specific skills
+    _is_profile_skill() {
+      local _name="$1"
+      for _s in "${PROFILE_SKILL_NAMES[@]+"${PROFILE_SKILL_NAMES[@]}"}"; do
+        [ "$_s" = "$_name" ] && return 0
+      done
+      return 1
+    }
+
+    # _check_skill NAME IS_PROFILE_SKILL
+    #   IS_PROFILE_SKILL=true  → profile routing: global if agent is global, else project
+    #   IS_PROFILE_SKILL=false → tamago built-in: always global
+    # explicit scope="project" override always wins regardless of IS_PROFILE_SKILL
+    _check_skill() {
+      local _name="$1" _is_profile="${2:-false}"
+      if _is_project_scoped "$_name"; then
+        check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
+      elif [ "$_is_profile" = "true" ] && [ "$AGENT_SCOPE" != "global" ]; then
+        check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
+      else
+        check_symlink "$HOME/.claude/skills/$_name" "~/.claude/skills/$_name"
+      fi
+    }
+
+    # Check tamago built-in skills.
+    # If a profile skill shadows a tamago built-in (same name), apply profile routing.
+    if [ -d "$REPO/skills" ]; then
+      for _skill_dir in "$REPO/skills"/*/; do
+        [ -d "$_skill_dir" ] || continue
+        _sname="$(basename "$_skill_dir")"
+        if _is_profile_skill "$_sname"; then
+          _check_skill "$_sname" "true"   # profile shadows tamago: profile routing
+        else
+          _check_skill "$_sname" "false"  # pure tamago built-in: always global
+        fi
+      done
+    fi
+
+    # Check profile-only skills (those not already covered by the tamago loop above)
     if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
       for _skill_dir in "$PROFILE_REPO/skills"/*/; do
         [ -d "$_skill_dir" ] || continue
-        _check_skill "$(basename "$_skill_dir")"
+        _sname="$(basename "$_skill_dir")"
+        [ -d "$REPO/skills/$_sname" ] && continue  # already checked in tamago loop
+        _check_skill "$_sname" "true"
       done
     fi
   fi
