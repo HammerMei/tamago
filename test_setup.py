@@ -306,7 +306,9 @@ class SetupHealthCheckIntegrationTests(unittest.TestCase):
 
         return source_root, project_root
 
-    def test_setup_calls_health_check_on_install(self):
+    def test_setup_does_not_call_health_check(self):
+        """setup() no longer calls run_health_check directly — it was moved to
+        install_from_conf() so the check runs after machine.toml is written."""
         with tempfile.TemporaryDirectory() as temp_dir:
             source_root, project_root = self._make_minimal_source(temp_dir)
 
@@ -316,7 +318,7 @@ class SetupHealthCheckIntegrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            hc_mock.assert_called_once_with(source_root, project_root)
+            hc_mock.assert_not_called()
 
     def test_setup_does_not_call_health_check_on_uninstall(self):
         with tempfile.TemporaryDirectory() as temp_dir:
