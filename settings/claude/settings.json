@@ -5,7 +5,10 @@
       "Bash(tts-cli.py *)",
       "Bash(python3 *.claude/skills/*.py *)",
       "Bash(python3 *.claude/skills/*/*.py *)",
+      "Bash(python3 ~/.claude/skills/*.py *)",
+      "Bash(python3 ~/.claude/skills/*/*.py *)",
       "Bash(ls .claude/skills*)",
+      "Bash(ls ~/.claude/skills*)",
       "Bash(keepassxc-cli show --no-password --key-file ~/.kpx-keys/*.key ~/workspace/*/secrets/*.kdbx *)"
     ]
   },
