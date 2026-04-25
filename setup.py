@@ -764,14 +764,35 @@ def _read_tamago_source_hooks(source_settings: dict) -> dict[str, list[str]]:
     return result
 
 
+def _expand_home_in_str(s: str) -> str:
+    """Expand ~ to the absolute home directory in a string.
+
+    Claude Code expands ~ in commands before matching against permission patterns,
+    but does NOT expand ~ in the patterns themselves.  To ensure patterns match,
+    we expand ~ at inject-time so the stored pattern uses the absolute path.
+    """
+    import os
+    home = os.path.expanduser("~")
+    return s.replace("~", home)
+
+
 def _read_tamago_source_perms(source_settings: dict) -> list[str]:
-    """Extract permissions.allow list from tamago source settings."""
-    return source_settings.get("permissions", {}).get("allow", [])
+    """Extract permissions.allow list from tamago source settings.
+
+    Expands ~ to the absolute home path so injected patterns match commands
+    where Claude Code has already expanded ~.
+    """
+    perms = source_settings.get("permissions", {}).get("allow", [])
+    return [_expand_home_in_str(p) for p in perms]
 
 
 def _read_tamago_source_additional_dirs(source_settings: dict) -> list[str]:
-    """Extract permissions.additionalDirectories list from tamago source settings."""
-    return source_settings.get("permissions", {}).get("additionalDirectories", [])
+    """Extract permissions.additionalDirectories list from tamago source settings.
+
+    Expands ~ to the absolute home path for consistent path comparison.
+    """
+    dirs = source_settings.get("permissions", {}).get("additionalDirectories", [])
+    return [_expand_home_in_str(d) for d in dirs]
 
 
 def patch_settings(
