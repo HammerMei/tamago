@@ -1143,6 +1143,8 @@ def setup_skills(
         global_skill_dirs = []
         local_skill_dirs = enabled_skill_dirs
 
+    local_bin = Path("~/.local/bin").expanduser()
+
     if operation == Operation.INSTALL:
         # Remove disabled skills from all possible locations
         for skill_name in disabled_skills:
@@ -1166,9 +1168,32 @@ def setup_skills(
             symlink_paths(global_skill_dirs, home_claude_skills)
             symlink_paths(global_skill_dirs, home_opencode_skills)
 
+            # Install CLI entry points to ~/.local/bin for global skills that have a bin/ dir
+            for d in global_skill_dirs:
+                skill_bin = d / "bin"
+                if skill_bin.is_dir():
+                    bin_files = [
+                        f for f in sorted(skill_bin.iterdir())
+                        if not f.name.startswith(".") and not f.is_dir()
+                    ]
+                    if bin_files:
+                        symlink_paths(bin_files, local_bin)
+
         # Install project-scoped skills (either explicit override, or all when agent is project-scoped)
         symlink_paths(local_skill_dirs, project_claude_skills)
         symlink_paths(local_skill_dirs, project_opencode_skills)
+
+        # Remove ~/.local/bin entries for skills that moved from global to project scope
+        for d in local_skill_dirs:
+            skill_bin = d / "bin"
+            if skill_bin.is_dir():
+                for f in sorted(skill_bin.iterdir()):
+                    if f.name.startswith(".") or f.is_dir():
+                        continue
+                    target = local_bin / f.name
+                    if target.is_symlink():
+                        target.unlink()
+                        print(f"removed {target} (moved to project scope)")
 
     elif operation == Operation.UNINSTALL:
         # Remove from all possible locations (handles scope changes between installs)
@@ -1176,6 +1201,16 @@ def setup_skills(
         unlink_paths(enabled_skill_dirs, home_opencode_skills)
         unlink_paths(enabled_skill_dirs, project_claude_skills)
         unlink_paths(enabled_skill_dirs, project_opencode_skills)
+        # Remove CLI entry points from ~/.local/bin
+        for d in enabled_skill_dirs:
+            skill_bin = d / "bin"
+            if skill_bin.is_dir():
+                bin_files = [
+                    f for f in sorted(skill_bin.iterdir())
+                    if not f.name.startswith(".") and not f.is_dir()
+                ]
+                if bin_files:
+                    unlink_paths(bin_files, local_bin)
 
 
 # ---------------------------------------------------------------------------

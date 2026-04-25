@@ -29,7 +29,7 @@ from typing import Optional
 # Paths
 # ---------------------------------------------------------------------------
 
-SCRIPT_DIR       = Path(__file__).parent
+SCRIPT_DIR       = Path(__file__).resolve().parent
 CONFIG_PATH      = SCRIPT_DIR / "config.json"
 TMP              = Path(tempfile.gettempdir())
 

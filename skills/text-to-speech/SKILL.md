@@ -15,17 +15,17 @@ description: >
 
 Run TTS via:
 ```bash
-python3 .claude/skills/text-to-speech/tts-cli.py --voice <name> --rate <rate> "text to speak"
+tts-cli.py --voice <name> --rate <rate> "text to speak"
 ```
 
 > ⚠️ **For long text**, pipe via stdin using `--file -` with a heredoc — avoids shell length limits and does **not** create any temp files (no approval prompts).
 > **Important:** the closing `EOF` delimiter **must be on its own line**.
 > Do **not** place `EOF` at the end of the final content line, or the shell may pass `EOF`
-> through as part of the text and TTS may literally speak “EOF”.
+> through as part of the text and TTS may literally speak "EOF".
 > If using a heredoc, always put the closing `EOF` on a new line by itself.
 > 否則 `EOF` 可能被當成正文內容送進 TTS。
 > ```bash
-> python3 .claude/skills/text-to-speech/tts-cli.py --voice Meijia --file - <<'EOF'
+> tts-cli.py --voice Meijia --file - <<'EOF'
 > long text goes here...
 > more lines...
 > EOF
@@ -38,27 +38,27 @@ python3 .claude/skills/text-to-speech/tts-cli.py --voice <name> --rate <rate> "t
 
 ```bash
 # Speak with explicit voice
-python3 .claude/skills/text-to-speech/tts-cli.py --voice Yue "你好！"
+tts-cli.py --voice Yue "你好！"
 
 # Speak by language/locale (auto-selects best installed voice)
-python3 .claude/skills/text-to-speech/tts-cli.py --lang zh-TW "你好！"
-python3 .claude/skills/text-to-speech/tts-cli.py --lang en-US "Hello world"
+tts-cli.py --lang zh-TW "你好！"
+tts-cli.py --lang en-US "Hello world"
 
 # Speak long text via stdin (preferred — no temp file, no approval prompt)
-python3 .claude/skills/text-to-speech/tts-cli.py --voice Samantha --file - <<'EOF'
+tts-cli.py --voice Samantha --file - <<'EOF'
 Long text goes here...
 EOF
 
 # Wrong: closing EOF is appended to content, so TTS may speak "EOF"
-python3 .claude/skills/text-to-speech/tts-cli.py --voice Samantha --file - <<'EOF'
+tts-cli.py --voice Samantha --file - <<'EOF'
 Long text goes here...EOF
 EOF
 
 # Interrupt current playback and speak immediately
-python3 .claude/skills/text-to-speech/tts-cli.py --force --voice Yue "緊急訊息！"
+tts-cli.py --force --voice Yue "緊急訊息！"
 
 # List voices for a language
-python3 .claude/skills/text-to-speech/tts-cli.py --list-voices --lang zh --json
+tts-cli.py --list-voices --lang zh --json
 ```
 
 ## Background queue behavior
@@ -74,7 +74,7 @@ All invocations are **non-blocking** by default:
 ### `--force` flag
 
 ```bash
-python3 .claude/skills/text-to-speech/tts-cli.py --force "urgent override"
+tts-cli.py --force "urgent override"
 ```
 
 `--force` / `-F`:
@@ -124,7 +124,7 @@ When `preferPremiumOrEnhancedVoice=true` (default), the CLI auto-upgrades to the
 
 ## Config
 
-Path: `.claude/skills/text-to-speech/config.json` (or `.claude/skills/text-to-speech/config.json`)
+Path: `~/.claude/skills/text-to-speech/config.json`
 
 | Key | Description |
 |-----|-------------|
@@ -174,10 +174,10 @@ If voice or language resolution fails (e.g. unknown voice name, locale not insta
 
 ```bash
 # Run all unit tests
-python3 -m pytest .claude/skills/text-to-speech/test_tts.py -v
+python3 -m pytest ~/.claude/skills/text-to-speech/test_tts.py -v
 
 # Or without pytest
-python3 .claude/skills/text-to-speech/test_tts.py
+python3 ~/.claude/skills/text-to-speech/test_tts.py
 ```
 
 Tests cover: locale normalization, voice tier ranking, voice resolution, locale selection,
