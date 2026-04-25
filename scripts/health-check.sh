@@ -283,13 +283,22 @@ section "3. Global Settings"
 check_patched "$HOME/.claude/settings.json"      "$HOME/.claude/.tamago-manifest.json"    "~/.claude/settings.json"
 check_patched "$HOME/.opencode/opencode.json"    "$HOME/.opencode/.tamago-manifest.json"  "~/.opencode/opencode.json"
 
+# Agent-scoped settings (patch+merge, separate from tamago layer) — global agent only
+if [ "$HAS_PROFILE" = true ] && [ "$AGENT_SCOPE" = "global" ]; then
+  check_patched "$HOME/.claude/settings.json"   "$HOME/.claude/.tamago-agent-manifest.json"   "~/.claude/settings.json (agent layer)"
+  check_patched "$HOME/.opencode/opencode.json" "$HOME/.opencode/.tamago-agent-manifest.json" "~/.opencode/opencode.json (agent layer)"
+fi
+
 # ─── 4. Project Symlinks ──────────────────────────────────────────────────────
 
 section "4. Project Symlinks  ($PROJECT_DIR)"
 
 if [ -d "$PROJECT_DIR" ]; then
-  check_symlink "$PROJECT_DIR/.claude/settings.json"   ".claude/settings.json"
-  check_symlink "$PROJECT_DIR/.opencode/opencode.json" ".opencode/opencode.json"
+  # Agent settings (patch+merge — not symlinks) — project agent only
+  if [ "$HAS_PROFILE" = true ] && [ "$AGENT_SCOPE" != "global" ]; then
+    check_patched "$PROJECT_DIR/.claude/settings.json"   "$PROJECT_DIR/.claude/.tamago-agent-manifest.json"   ".claude/settings.json"
+    check_patched "$PROJECT_DIR/.opencode/opencode.json" "$PROJECT_DIR/.opencode/.tamago-agent-manifest.json" ".opencode/opencode.json"
+  fi
 
   # machine.env — v2 shell bridge, written by `tamago install`
   if [ -f "$PROJECT_DIR/.tamago/machine.env" ]; then
