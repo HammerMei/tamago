@@ -73,6 +73,26 @@ else
   AGENT_NAME=""
 fi
 
+# Read agent scope and disable status from tamago.conf
+AGENT_SCOPE="project"
+AGENT_DISABLED="false"
+if [ -f "$PROJECT_CONF" ] && [ -n "$AGENT_NAME" ]; then
+  _scope_out=$(python3 - "$PROJECT_CONF" "$AGENT_NAME" <<'PY' 2>/dev/null
+import sys, tomllib
+conf_path, name = sys.argv[1], sys.argv[2]
+with open(conf_path, 'rb') as f:
+    conf = tomllib.load(f)
+for a in conf.get('agents', []):
+    if a.get('name') == name:
+        print(a.get('scope', 'project'), str(a.get('disable', False)).lower())
+        break
+else:
+    print('project false')
+PY
+  ) || _scope_out="project false"
+  read -r AGENT_SCOPE AGENT_DISABLED <<< "$_scope_out"
+fi
+
 # ─── Colors (only when printing to terminal, not in JSON mode) ────────────────
 
 if [ "$JSON" = false ] && [ -t 1 ]; then
@@ -297,9 +317,17 @@ if [ -d "$PROJECT_DIR" ]; then
   if [ "$HAS_PROFILE" = false ]; then
     pass "agent symlinks" "no profile configured — skipping"
   elif [ -n "$AGENT_NAME" ]; then
-    check_generated "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
-    check_symlink   "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
-    check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
+    if [ "$AGENT_DISABLED" = "true" ]; then
+      pass "agent ($AGENT_NAME)" "disabled in tamago.conf — skipped"
+    elif [ "$AGENT_SCOPE" = "global" ]; then
+      check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
+      check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
+      check_generated "$HOME/.opencode/agents/$AGENT_NAME.md"  "~/.opencode/agents/$AGENT_NAME.md"
+    else
+      check_generated "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
+      check_symlink   "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
+      check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
+    fi
   else
     warn "agent symlinks" "no agent name in profile settings — skipping"
   fi
