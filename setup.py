@@ -205,6 +205,7 @@ class AgentEntry:
     scope: str = "project"
     tts: bool = True
     memory: bool = True
+    disable: bool = False
 
 
 @dataclass
@@ -213,6 +214,7 @@ class SkillEntry:
     source: str = "tamago"
     scope: str = "global"
     path: str | None = None
+    disable: bool = False
 
 
 @dataclass
@@ -256,6 +258,7 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
                 scope=a.get("scope", "project"),
                 tts=a.get("tts", True),
                 memory=a.get("memory", True),
+                disable=a.get("disable", False),
             )
             for a in raw.get("agents", [])
             if "name" in a
@@ -266,6 +269,7 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
                 source=s.get("source", "tamago"),
                 scope=s.get("scope", "global"),
                 path=s.get("path"),
+                disable=s.get("disable", False),
             )
             for s in raw.get("skills", [])
             if "name" in s
@@ -828,9 +832,29 @@ def _remove_generated_agents(profile_root: Path, target_dir: Path) -> None:
         stem = persona_file.stem
         agent_name = stem[: -len(".persona")] if stem.endswith(".persona") else stem
         target = target_dir / f"{agent_name}.md"
-        if target.exists() and GENERATED_HEADER_MARKER in target.read_text()[:300]:
+        if target.exists() and GENERATED_HEADER_MARKER in target.read_text()[:1024]:
             target.unlink()
             print(f"removed {target}")
+
+
+def _remove_agent_files_if_managed(agent_name: str, target_dirs: list[Path], label: str = "") -> None:
+    """Remove a tamago-managed agent file (symlink or generated) from each target dir.
+
+    Removes the file only if it is a symlink OR contains the GENERATED_HEADER_MARKER.
+    Silently skips if the file is absent.  Warns if the file exists but is user-owned.
+    """
+    suffix = f" ({label})" if label else ""
+    for target_dir in target_dirs:
+        target = target_dir / f"{agent_name}.md"
+        if target.is_symlink():
+            target.unlink()
+            print(f"removed {target}{suffix}")
+        elif target.exists():
+            if GENERATED_HEADER_MARKER in target.read_text()[:1024]:
+                target.unlink()
+                print(f"removed {target}{suffix}")
+            else:
+                print(f"warning {target} is not tamago-managed — leaving it in place")
 
 
 def setup_agents(
@@ -839,13 +863,42 @@ def setup_agents(
     project_root: Path,
     profile_root: Path | None = None,
     tts_enabled: bool = True,
+    disabled_agents: "set[str] | None" = None,
+    global_agents: "set[str] | None" = None,
 ):
+    """Install/uninstall agents into project_root (and optionally into ~/.claude/agents/).
+
+    disabled_agents: skip entirely — no agent file, no memory dir.
+    global_agents:   install to ~/.claude/agents/ instead of project-level agents dir;
+                     memory dirs are still installed at project level so per-project
+                     memory works correctly.
+    On UNINSTALL: both project-level and home-level dirs are checked, so a scope
+    change between installs does not leave orphaned files.
+    """
+    if disabled_agents is None:
+        disabled_agents = set()
+    if global_agents is None:
+        global_agents = set()
+
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
     target_claude_agent_root = project_root / ".claude" / "agents"
     target_claude_agent_mem_root = project_root / ".claude" / "agent-memory"
     target_opencode_agent_root = project_root / ".opencode" / "agents"
     target_opencode_plugin_root = project_root / ".opencode" / "plugins"
+
+    home_claude_agents = Path("~/.claude/agents").expanduser()
+    home_opencode_agents = Path("~/.opencode/agents").expanduser()
+
+    # All dirs an agent might have been installed to (for disabled cleanup / uninstall)
+    all_claude_dirs = [target_claude_agent_root, home_claude_agents]
+    all_opencode_dirs = [target_opencode_agent_root, home_opencode_agents]
+
+    def _claude_dir(agent_name: str) -> Path:
+        return home_claude_agents if agent_name in global_agents else target_claude_agent_root
+
+    def _opencode_dir(agent_name: str) -> Path:
+        return home_opencode_agents if agent_name in global_agents else target_opencode_agent_root
 
     opencode_plugin_files = sub_paths(
         source_opencode_plugin_root, lambda p: p.is_file() and p.suffix == ".ts"
@@ -855,11 +908,26 @@ def setup_agents(
     tamago_agent_files = sub_paths(
         source_root / "agents", lambda p: p.is_file() and p.suffix == ".md"
     )
+    enabled_tamago_agents = [f for f in tamago_agent_files if f.stem not in disabled_agents]
 
     if operation == Operation.INSTALL:
-        # 1. Symlink tamago generic agents
-        symlink_paths(tamago_agent_files, target_claude_agent_root)
-        symlink_paths(tamago_agent_files, target_opencode_agent_root)
+        # Remove files for disabled agents from all possible locations
+        for agent_name in disabled_agents:
+            _remove_agent_files_if_managed(agent_name, all_claude_dirs + all_opencode_dirs, "disabled")
+
+        # Remove project-level files for agents that moved to global scope
+        # (covers the case where scope was previously "project" and is now "global")
+        for agent_name in global_agents:
+            _remove_agent_files_if_managed(
+                agent_name,
+                [target_claude_agent_root, target_opencode_agent_root],
+                "moved to global scope",
+            )
+
+        # 1. Symlink tamago generic agents — routed to project or home by scope
+        for f in enabled_tamago_agents:
+            symlink_paths([f], _claude_dir(f.stem))
+            symlink_paths([f], _opencode_dir(f.stem))
         symlink_paths(opencode_plugin_files, target_opencode_plugin_root)
 
         # 2. Merge persona agents from profile (*.persona.md → generated *.md)
@@ -869,15 +937,26 @@ def setup_agents(
                 profile_root / "agents",
                 lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
             )
-            symlink_paths(profile_agent_files, target_claude_agent_root)
-            symlink_paths(profile_agent_files, target_opencode_agent_root)
+            enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
+            for f in enabled_profile_agents:
+                symlink_paths([f], _claude_dir(f.stem))
+                symlink_paths([f], _opencode_dir(f.stem))
 
             for persona_file in sorted((profile_root / "agents").iterdir()):
                 if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
-                    _merge_agent(source_root, profile_root, persona_file, target_claude_agent_root, tts_enabled)
-                    _merge_agent(source_root, profile_root, persona_file, target_opencode_agent_root, tts_enabled)
+                    agent_name = persona_file.stem
+                    if agent_name.endswith(".persona"):
+                        agent_name = agent_name[: -len(".persona")]
+                    if agent_name in disabled_agents:
+                        continue
+                    _merge_agent(source_root, profile_root, persona_file, _claude_dir(agent_name), tts_enabled)
+                    _merge_agent(source_root, profile_root, persona_file, _opencode_dir(agent_name), tts_enabled)
 
-        # 3. Memory dirs from profile (or tamago fallback)
+        # 3. Memory dirs — follow agent scope (same as agent file)
+        #    Global agents: ~/.claude/agent-memory/  (accessible from any project)
+        #    Project agents: {project}/.claude/agent-memory/
+        home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
+
         if profile_root and (profile_root / "agents" / "memory").is_dir():
             mem_source = profile_root / "agents" / "memory"
         elif (source_root / "agents" / "memory").is_dir():
@@ -887,11 +966,36 @@ def setup_agents(
 
         if mem_source:
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
-            symlink_paths(agent_mem_dirs, target_claude_agent_mem_root)
+            enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
+
+            # Remove project-level memory symlink for agents that moved to global scope
+            for d in enabled_mem_dirs:
+                if d.name in global_agents:
+                    old_project_mem = target_claude_agent_mem_root / d.name
+                    if old_project_mem.is_symlink():
+                        old_project_mem.unlink()
+                        print(f"removed {old_project_mem} (moved to global scope)")
+
+            global_mem_dirs = [d for d in enabled_mem_dirs if d.name in global_agents]
+            project_mem_dirs = [d for d in enabled_mem_dirs if d.name not in global_agents]
+            symlink_paths(global_mem_dirs, home_agent_mem_root)
+            symlink_paths(project_mem_dirs, target_claude_agent_mem_root)
 
     elif operation == Operation.UNINSTALL:
-        unlink_paths(tamago_agent_files, target_claude_agent_root)
-        unlink_paths(tamago_agent_files, target_opencode_agent_root)
+        # Determine which dirs to clean up for a given agent, based on current conf scope.
+        # If scope changed between installs without re-running install, an orphan may remain —
+        # that is acceptable; the user can clean it up manually or re-install first.
+        def _uninstall_dirs(agent_name: str) -> list[Path]:
+            if agent_name in global_agents:
+                return [home_claude_agents, home_opencode_agents]
+            return [target_claude_agent_root, target_opencode_agent_root]
+
+        for f in enabled_tamago_agents:
+            for d in _uninstall_dirs(f.stem):
+                t = d / f.name
+                if t.is_symlink():
+                    t.unlink()
+                    print(f"removed {t}")
         unlink_paths(opencode_plugin_files, target_opencode_plugin_root)
 
         # Remove symlinked plain profile agents and generated persona agents
@@ -900,19 +1004,41 @@ def setup_agents(
                 profile_root / "agents",
                 lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
             )
-            unlink_paths(profile_agent_files, target_claude_agent_root)
-            unlink_paths(profile_agent_files, target_opencode_agent_root)
-            _remove_generated_agents(profile_root, target_claude_agent_root)
-            _remove_generated_agents(profile_root, target_opencode_agent_root)
+            enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
+            for f in enabled_profile_agents:
+                for d in _uninstall_dirs(f.stem):
+                    t = d / f.name
+                    if t.is_symlink():
+                        t.unlink()
+                        print(f"removed {t}")
 
-        # Remove memory symlinks
+            # Generated persona agents: remove from their scoped dirs
+            for persona_file in (profile_root / "agents").iterdir():
+                if not (persona_file.is_file() and persona_file.name.endswith(".persona.md")):
+                    continue
+                name = persona_file.stem
+                if name.endswith(".persona"):
+                    name = name[: -len(".persona")]
+                if name in disabled_agents:
+                    continue
+                for d in _uninstall_dirs(name):
+                    _remove_agent_files_if_managed(name, [d])
+
+        # Remove memory symlinks — scope-aware (mirrors INSTALL routing)
         mem_source = (
             (profile_root / "agents" / "memory") if profile_root
             else (source_root / "agents" / "memory")
         )
+        home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
         if mem_source.is_dir():
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
-            unlink_paths(agent_mem_dirs, target_claude_agent_mem_root)
+            enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
+            for d in enabled_mem_dirs:
+                mem_root = home_agent_mem_root if d.name in global_agents else target_claude_agent_mem_root
+                target = mem_root / d.name
+                if target.is_symlink():
+                    target.unlink()
+                    print(f"removed {target}")
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1050,7 @@ def setup_skills(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
+    disabled_skills: "set[str] | None" = None,
 ):
     """Symlink skills into project_root.
 
@@ -932,7 +1059,11 @@ def setup_skills(
       2. profile/skills/ — custom skills defined in the profile repo (optional)
 
     When both sources contain a skill with the same name, the profile version wins.
+    disabled_skills: names of skills to skip (and remove existing symlinks for on INSTALL).
     """
+    if disabled_skills is None:
+        disabled_skills = set()
+
     target_claude_skills_root = project_root / ".claude" / "skills"
     target_opencode_skills_root = project_root / ".opencode" / "skills"
 
@@ -957,12 +1088,22 @@ def setup_skills(
         d for d in tamago_skill_dirs if d.name not in profile_skill_names
     ] + profile_skill_dirs
 
+    # Filter out disabled skills
+    enabled_skill_dirs = [d for d in merged_skill_dirs if d.name not in disabled_skills]
+
     if operation == Operation.INSTALL:
-        symlink_paths(merged_skill_dirs, target_claude_skills_root)
-        symlink_paths(merged_skill_dirs, target_opencode_skills_root)
+        # Remove existing symlinks for disabled skills (cleanup when disable=true is added)
+        for skills_root in (target_claude_skills_root, target_opencode_skills_root):
+            for skill_name in disabled_skills:
+                target = skills_root / skill_name
+                if target.is_symlink():
+                    target.unlink()
+                    print(f"removed {target} (disabled)")
+        symlink_paths(enabled_skill_dirs, target_claude_skills_root)
+        symlink_paths(enabled_skill_dirs, target_opencode_skills_root)
     elif operation == Operation.UNINSTALL:
-        unlink_paths(merged_skill_dirs, target_claude_skills_root)
-        unlink_paths(merged_skill_dirs, target_opencode_skills_root)
+        unlink_paths(enabled_skill_dirs, target_claude_skills_root)
+        unlink_paths(enabled_skill_dirs, target_opencode_skills_root)
 
 
 # ---------------------------------------------------------------------------
@@ -1131,13 +1272,23 @@ def setup_external_skills(
             )
             continue
 
+        skills_roots = (
+            project_root / ".claude" / "skills",
+            project_root / ".opencode" / "skills",
+        )
+
         if operation == Operation.INSTALL:
+            if skill.disable:
+                # Remove any pre-existing symlink for this skill; leave cache dir intact
+                for skills_root in skills_roots:
+                    target = skills_root / skill.name
+                    if target.is_symlink():
+                        target.unlink()
+                        print(f"removed {target} (disabled)")
+                continue
             try:
                 skill_dir = _resolve_external_skill_dir(skill, cache_root)
-                for skills_root in (
-                    project_root / ".claude" / "skills",
-                    project_root / ".opencode" / "skills",
-                ):
+                for skills_root in skills_roots:
                     target = skills_root / skill.name
                     skills_root.mkdir(parents=True, exist_ok=True)
                     if target.is_symlink():
@@ -1156,10 +1307,7 @@ def setup_external_skills(
                 errors += 1
 
         elif operation == Operation.UNINSTALL:
-            for skills_root in (
-                project_root / ".claude" / "skills",
-                project_root / ".opencode" / "skills",
-            ):
+            for skills_root in skills_roots:
                 target = skills_root / skill.name
                 if target.is_symlink():
                     target.unlink()
@@ -1273,12 +1421,15 @@ def setup(
     profile_root: Path | None = None,
     memory_sync: bool = True,
     tts_enabled: bool = True,
+    disabled_skills: "set[str] | None" = None,
+    disabled_agents: "set[str] | None" = None,
+    global_agents: "set[str] | None" = None,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root, profile_root)
-        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled)
+        setup_skills(operation, source_root, project_root, profile_root, disabled_skills)
+        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, global_agents=global_agents)
         setup_settings(operation, source_root, project_root, profile_root)
 
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
@@ -1570,6 +1721,10 @@ def install_from_conf(
         if pull_cached_skills:
             _pull_skill_repos(conf.skills, cache_root)
 
+    disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
+    disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
+    global_agents: set[str] = {a.name for a in conf.agents if a.scope == "global" and not a.disable}
+
     rc = setup(
         operation,
         source_root,
@@ -1577,6 +1732,9 @@ def install_from_conf(
         profile_root=profile_root,
         memory_sync=conf.memory_sync,
         tts_enabled=tts_enabled,
+        disabled_skills=disabled_skills,
+        disabled_agents=disabled_agents,
+        global_agents=global_agents,
     )
     if rc != 0:
         return rc

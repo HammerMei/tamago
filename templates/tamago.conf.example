@@ -18,30 +18,47 @@ name = "hammer.mei"
 
 # ── Agents ─────────────────────────────────────────────────────────────────────
 # Agents to install into this project.
-# name   — agent name (must match a persona file in the profile)
-# source — "profile" (from profile repo) or "tamago" (built-in)  [default: tamago]
-# scope  — "project" (per-project) or "global" (home-level)      [default: project]
-# tts    — generate TTS-enabled agent file                        [default: true]
-# memory — wire up agent-memory symlinks                          [default: true]
+# name    — agent name (must match a persona file in the profile)
+# source  — "profile" (from profile repo) or "tamago" (built-in)  [default: tamago]
+# scope   — "project" → .claude/agents/ inside this project        [default: project]
+#            "global"  → ~/.claude/agents/ so the agent is available
+#                        from any Claude Code session on this machine.
+#                        Memory dirs are still set up at project level.
+# tts     — generate TTS-enabled agent file                        [default: true]
+# memory  — wire up agent-memory symlinks                          [default: true]
+# disable — set to true to prevent installation and remove any
+#            existing file for this agent                          [default: false]
 
 [[agents]]
 name   = "hammer.mei"
 source = "profile"
-scope  = "project"
+scope  = "global"   # install to ~/.claude/agents/ — available from every project
 tts    = true
 memory = true
 
+# Example: opt out of a built-in tamago agent
+# [[agents]]
+# name    = "code-reviewer"
+# disable = true
+
 # ── Skills ─────────────────────────────────────────────────────────────────────
 # Skills to symlink into this project.
-# name   — skill directory name
-# source — "tamago" (built-in) or "profile" (from profile/skills/) [default: tamago]
-# scope  — "project" only (global skills not yet supported)        [default: global — warn]
-# path   — override path (for source = "url" skills)               [optional]
+# name    — skill directory name
+# source  — "tamago" (built-in) or "profile" (from profile/skills/) [default: tamago]
+# scope   — "project" only (global skills not yet supported)         [default: global — warn]
+# path    — override path (for source = "url" skills)                [optional]
+# disable — set to true to prevent installation and remove any
+#            existing symlink for this skill                         [default: false]
 
 [[skills]]
 name   = "text-to-speech"
 source = "tamago"
 scope  = "project"
+
+# Example: opt out of a built-in tamago skill
+# [[skills]]
+# name    = "cmux-markdown"
+# disable = true
 
 # Example: URL-sourced external skill
 # [[skills]]
