@@ -4139,5 +4139,751 @@ class DisableAgentTests(unittest.TestCase):
             self.assertEqual(captured["disabled_skills"], {"cmux-markdown"})
 
 
+# ---------------------------------------------------------------------------
+# patch_opencode_global_settings
+# ---------------------------------------------------------------------------
+
+class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
+    """Tests for patch_opencode_global_settings — INSTALL writes manifest, UNINSTALL removes it."""
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def test_install_writes_opencode_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            (source / "settings" / "opencode").mkdir(parents=True)
+            (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.patch_opencode_global_settings(
+                    setup_module.Operation.INSTALL, source
+                )
+
+            manifest = root / "home" / ".opencode" / ".tamago-manifest.json"
+            self.assertTrue(manifest.exists())
+
+    def test_uninstall_removes_opencode_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            (source / "settings" / "opencode").mkdir(parents=True)
+            (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.patch_opencode_global_settings(
+                    setup_module.Operation.INSTALL, source
+                )
+                manifest = root / "home" / ".opencode" / ".tamago-manifest.json"
+                self.assertTrue(manifest.exists())
+
+                setup_module.patch_opencode_global_settings(
+                    setup_module.Operation.UNINSTALL, source
+                )
+            self.assertFalse(manifest.exists())
+
+
+# ---------------------------------------------------------------------------
+# setup_shell_env
+# ---------------------------------------------------------------------------
+
+class SetupShellEnvTests(unittest.TestCase):
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def _make_source(self, root: Path) -> Path:
+        source = root / "tamago"
+        source.mkdir(parents=True)
+        return source
+
+    def test_install_adds_env_when_zshrc_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)  # ensure home dir exists
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_shell_env(setup_module.Operation.INSTALL, source)
+
+            self.assertTrue(zshrc.exists())
+            self.assertIn(str(source), zshrc.read_text())
+
+    def test_install_appends_env_when_marker_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text("export FOO=bar\n")
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_shell_env(setup_module.Operation.INSTALL, source)
+
+            content = zshrc.read_text()
+            self.assertIn("ASSISTANT_SETUP_REPO", content)
+            self.assertIn("export FOO=bar", content)
+
+    def test_install_updates_existing_marker(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text('export ASSISTANT_SETUP_REPO="/old/path"\n')
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_shell_env(setup_module.Operation.INSTALL, source)
+
+            content = zshrc.read_text()
+            self.assertIn(str(source), content)
+            self.assertNotIn("/old/path", content)
+
+    def test_install_skips_when_marker_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            env_line = f'export ASSISTANT_SETUP_REPO="{source}"'
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text(env_line + "\n")
+
+            out = io.StringIO()
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with contextlib.redirect_stdout(out):
+                    setup_module.setup_shell_env(setup_module.Operation.INSTALL, source)
+
+            self.assertIn("exists", out.getvalue())
+            # Content unchanged
+            self.assertEqual(zshrc.read_text(), env_line + "\n")
+
+    def test_install_skips_when_conventional_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = io.StringIO()
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with contextlib.redirect_stdout(out):
+                    setup_module.setup_shell_env(
+                        setup_module.Operation.INSTALL,
+                        setup_module.CONVENTIONAL_ROOT,
+                    )
+            self.assertIn("skip", out.getvalue())
+
+    def test_uninstall_removes_env_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text(
+                "export FOO=bar\n"
+                "# Tamago assistant repo\n"
+                f'export ASSISTANT_SETUP_REPO="{source}"\n'
+            )
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_shell_env(setup_module.Operation.UNINSTALL, source)
+
+            content = zshrc.read_text()
+            self.assertNotIn("ASSISTANT_SETUP_REPO", content)
+            self.assertNotIn("Tamago assistant repo", content)
+            self.assertIn("export FOO=bar", content)
+
+    def test_uninstall_no_op_when_zshrc_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            # No zshrc — should not raise
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_shell_env(setup_module.Operation.UNINSTALL, source)
+
+
+# ---------------------------------------------------------------------------
+# setup_local_bin
+# ---------------------------------------------------------------------------
+
+class SetupLocalBinTests(unittest.TestCase):
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def _make_source_with_bin(self, root: Path) -> Path:
+        source = root / "tamago"
+        tamago_bin = source / "bin" / "tamago"
+        tamago_bin.parent.mkdir(parents=True)
+        tamago_bin.write_text("#!/bin/bash\n")
+        return source
+
+    def test_install_creates_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin(root)
+            local_bin = root / "home" / ".local" / "bin"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+
+            self.assertTrue((local_bin / "tamago").is_symlink())
+
+    def test_install_adds_path_to_zshrc(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text("")
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+
+            self.assertIn(".local/bin", zshrc.read_text())
+
+    def test_install_skips_path_when_already_in_zshrc(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin(root)
+            zshrc = root / "home" / ".zshrc"
+            zshrc.parent.mkdir(parents=True)
+            zshrc.write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+
+            out = io.StringIO()
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with contextlib.redirect_stdout(out):
+                    setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+
+            self.assertIn("exists", out.getvalue())
+
+    def test_install_raises_when_tamago_bin_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            source.mkdir(parents=True)
+            # No bin/tamago
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception, msg="tamago bin script not found"):
+                    setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+
+    def test_install_updates_stale_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin(root)
+            local_bin = root / "home" / ".local" / "bin"
+            local_bin.mkdir(parents=True)
+            old_target = root / "old" / "tamago"
+            old_target.parent.mkdir(parents=True)
+            old_target.write_text("#!/bin/bash")
+            (local_bin / "tamago").symlink_to(old_target)
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+
+            link = local_bin / "tamago"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), (source / "bin" / "tamago").resolve())
+
+    def test_uninstall_removes_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin(root)
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_local_bin(setup_module.Operation.INSTALL, source)
+                setup_module.setup_local_bin(setup_module.Operation.UNINSTALL, source)
+
+            local_bin = root / "home" / ".local" / "bin"
+            self.assertFalse((local_bin / "tamago").exists())
+
+
+# ---------------------------------------------------------------------------
+# setup_git_hooks
+# ---------------------------------------------------------------------------
+
+class SetupGitHooksTests(unittest.TestCase):
+
+    def test_install_symlinks_hooks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            hooks_src = source / "git-hooks"
+            hooks_src.mkdir(parents=True)
+            (hooks_src / "pre-commit").write_text("#!/bin/bash\n")
+            git_hooks = source / ".git" / "hooks"
+
+            setup_module.setup_git_hooks(setup_module.Operation.INSTALL, source)
+
+            self.assertTrue((git_hooks / "pre-commit").is_symlink())
+
+    def test_install_no_op_when_no_git_hooks_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            # No git-hooks/ dir — should not raise
+            setup_module.setup_git_hooks(setup_module.Operation.INSTALL, source)
+
+    def test_uninstall_removes_hooks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            hooks_src = source / "git-hooks"
+            hooks_src.mkdir(parents=True)
+            (hooks_src / "pre-commit").write_text("#!/bin/bash\n")
+
+            setup_module.setup_git_hooks(setup_module.Operation.INSTALL, source)
+            git_hooks = source / ".git" / "hooks"
+            self.assertTrue((git_hooks / "pre-commit").is_symlink())
+
+            setup_module.setup_git_hooks(setup_module.Operation.UNINSTALL, source)
+            self.assertFalse((git_hooks / "pre-commit").exists())
+
+
+# ---------------------------------------------------------------------------
+# setup_global (exception isolation)
+# ---------------------------------------------------------------------------
+
+class SetupGlobalTests(unittest.TestCase):
+    """setup_global runs all steps independently — one failure must not block others."""
+
+    def test_one_failing_step_returns_1_but_others_still_run(self):
+        ran = []
+
+        def boom(*a, **k):
+            raise Exception("step exploded")
+
+        def ok(*a, **k):
+            ran.append("ok")
+
+        # Patch the five steps: first one raises, rest succeed
+        with (
+            mock.patch.object(setup_module, "patch_global_settings", side_effect=boom),
+            mock.patch.object(setup_module, "patch_opencode_global_settings", side_effect=ok),
+            mock.patch.object(setup_module, "setup_shell_env", side_effect=ok),
+            mock.patch.object(setup_module, "setup_git_hooks", side_effect=ok),
+            mock.patch.object(setup_module, "setup_local_bin", side_effect=ok),
+        ):
+            rc = setup_module.setup_global(
+                setup_module.Operation.INSTALL, Path("/fake")
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(ran), 4)  # all four non-failing steps ran
+
+    def test_all_steps_succeed_returns_0(self):
+        noop = mock.Mock()
+        with (
+            mock.patch.object(setup_module, "patch_global_settings", noop),
+            mock.patch.object(setup_module, "patch_opencode_global_settings", noop),
+            mock.patch.object(setup_module, "setup_shell_env", noop),
+            mock.patch.object(setup_module, "setup_git_hooks", noop),
+            mock.patch.object(setup_module, "setup_local_bin", noop),
+        ):
+            rc = setup_module.setup_global(
+                setup_module.Operation.INSTALL, Path("/fake")
+            )
+        self.assertEqual(rc, 0)
+
+
+# ---------------------------------------------------------------------------
+# setup_skills — bin/ entry points and UNINSTALL
+# ---------------------------------------------------------------------------
+
+class SetupSkillsBinAndUninstallTests(unittest.TestCase):
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def _make_source_with_bin_skill(self, root: Path, skill_name: str) -> Path:
+        source = root / "tamago"
+        skill_dir = source / "skills" / skill_name
+        bin_dir = skill_dir / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / f"{skill_name}-cli.py").write_text("#!/usr/bin/env python3\n")
+        return source
+
+    def test_global_skill_with_bin_creates_local_bin_entry(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin_skill(root, "tts")
+            project = root / "project"
+            local_bin = root / "home" / ".local" / "bin"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL, source, project,
+                    has_global_agent=False,
+                )
+
+            self.assertTrue((local_bin / "tts-cli.py").is_symlink())
+
+    def test_uninstall_removes_global_skill_and_bin_entry(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin_skill(root, "tts")
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+            local_bin = root / "home" / ".local" / "bin"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL, source, project,
+                    has_global_agent=False,
+                )
+                self.assertTrue((home_claude_skills / "tts").is_symlink())
+                self.assertTrue((local_bin / "tts-cli.py").is_symlink())
+
+                setup_module.setup_skills(
+                    setup_module.Operation.UNINSTALL, source, project,
+                    has_global_agent=False,
+                )
+
+            self.assertFalse((home_claude_skills / "tts").exists())
+            self.assertFalse((local_bin / "tts-cli.py").exists())
+
+    def test_project_scoped_skill_bin_removed_from_local_bin_on_scope_change(self):
+        """When a global skill is re-scoped to project, its ~/.local/bin entry is removed."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source_with_bin_skill(root, "tts")
+            project = root / "project"
+            local_bin = root / "home" / ".local" / "bin"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                # First install: global
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL, source, project,
+                    has_global_agent=False,
+                )
+                self.assertTrue((local_bin / "tts-cli.py").is_symlink())
+
+                # Re-install: now project-scoped via override
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL, source, project,
+                    project_scoped_skills={"tts"},
+                    has_global_agent=False,
+                )
+
+            self.assertFalse((local_bin / "tts-cli.py").exists())
+            self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
+
+    def test_stale_project_symlink_removed_when_skill_moves_to_global(self):
+        """When a project-scoped skill moves to global, old project/.claude/skills/ symlink is removed."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            (source / "skills" / "tts").mkdir(parents=True)
+            project = root / "project"
+            project_skills = project / ".claude" / "skills"
+            project_skills.mkdir(parents=True)
+            (project_skills / "tts").symlink_to(source / "skills" / "tts")
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL, source, project,
+                    has_global_agent=False,  # tamago built-in → global
+                )
+
+            # Old project-level symlink must be gone
+            self.assertFalse((project_skills / "tts").exists())
+            # Now installed at global
+            self.assertTrue((root / "home" / ".claude" / "skills" / "tts").is_symlink())
+
+
+# ---------------------------------------------------------------------------
+# setup_agents — memory dirs and UNINSTALL
+# ---------------------------------------------------------------------------
+
+class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def _make_minimal_source(self, root: Path) -> Path:
+        source = root / "tamago"
+        (source / "agents").mkdir(parents=True)
+        (source / "skills").mkdir(parents=True)
+        (source / "settings" / "claude").mkdir(parents=True)
+        (source / "settings" / "opencode" / "plugins").mkdir(parents=True)
+        (source / "settings" / "claude" / "settings.json").write_text("{}")
+        (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+        (source / "docs").mkdir(parents=True)
+        (source / "docs" / "tamago-agent-base.md").write_text("# Base\n")
+        return source
+
+    def _make_profile_with_memory(self, root: Path, agent_name: str) -> Path:
+        profile = root / "profile"
+        (profile / "agents").mkdir(parents=True)
+        (profile / "agents" / f"{agent_name}.persona.md").write_text(
+            f"---\nname: {agent_name}\n---\n# Persona\n"
+        )
+        mem_dir = profile / "agents" / "memory" / agent_name
+        mem_dir.mkdir(parents=True)
+        return profile
+
+    def test_project_agent_memory_goes_to_project_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL,
+                    source, project,
+                    profile_root=profile,
+                    global_agents=set(),
+                )
+
+            mem_link = project / ".claude" / "agent-memory" / "hammer.mei"
+            self.assertTrue(mem_link.is_symlink())
+            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
+            self.assertFalse(home_mem.exists())
+
+    def test_global_agent_memory_goes_to_home_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL,
+                    source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+
+            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
+            self.assertTrue(home_mem.is_symlink())
+            project_mem = project / ".claude" / "agent-memory" / "hammer.mei"
+            self.assertFalse(project_mem.exists())
+
+    def test_global_agent_memory_cleans_up_old_project_symlink(self):
+        """When agent moves to global, stale project-level memory symlink is removed."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                # First install as project-scoped
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL,
+                    source, project,
+                    profile_root=profile,
+                    global_agents=set(),
+                )
+                project_mem = project / ".claude" / "agent-memory" / "hammer.mei"
+                self.assertTrue(project_mem.is_symlink())
+
+                # Re-install as global-scoped
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL,
+                    source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+
+            # Old project symlink cleaned up
+            self.assertFalse(project_mem.exists())
+            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
+            self.assertTrue(home_mem.is_symlink())
+
+    def test_uninstall_removes_project_agent_and_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL, source, project,
+                    profile_root=profile, global_agents=set(),
+                )
+                mem_link = project / ".claude" / "agent-memory" / "hammer.mei"
+                self.assertTrue(mem_link.is_symlink())
+
+                setup_module.setup_agents(
+                    setup_module.Operation.UNINSTALL, source, project,
+                    profile_root=profile, global_agents=set(),
+                )
+
+            self.assertFalse(mem_link.exists())
+            agent_md = project / ".claude" / "agents" / "hammer.mei.md"
+            self.assertFalse(agent_md.exists())
+
+    def test_uninstall_removes_global_agent_and_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_agents(
+                    setup_module.Operation.INSTALL, source, project,
+                    profile_root=profile, global_agents={"hammer.mei"},
+                )
+                home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
+                self.assertTrue(home_mem.is_symlink())
+
+                setup_module.setup_agents(
+                    setup_module.Operation.UNINSTALL, source, project,
+                    profile_root=profile, global_agents={"hammer.mei"},
+                )
+
+            self.assertFalse(home_mem.exists())
+
+
+# ---------------------------------------------------------------------------
+# main() / CLI dispatch
+# ---------------------------------------------------------------------------
+
+class MainCliDispatchTests(unittest.TestCase):
+    """Tests for main() argument parsing and command routing."""
+
+    def _make_minimal_source(self, root: Path) -> Path:
+        source = root / "tamago"
+        (source / "agents").mkdir(parents=True)
+        (source / "skills").mkdir(parents=True)
+        (source / "settings" / "claude").mkdir(parents=True)
+        (source / "settings" / "opencode" / "plugins").mkdir(parents=True)
+        (source / "settings" / "claude" / "settings.json").write_text("{}")
+        (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+        return source
+
+    def _run(self, argv: list[str], source_root: Path | None = None,
+             extra_patches: dict | None = None) -> int:
+        patches = {
+            "pull_repo": mock.Mock(),
+        }
+        if source_root:
+            patches["resolve_source_root"] = mock.Mock(return_value=source_root)
+        if extra_patches:
+            patches.update(extra_patches)
+
+        with mock.patch("sys.argv", ["setup.py"] + argv):
+            ctx = contextlib.ExitStack()
+            for name, val in patches.items():
+                if callable(val) and not isinstance(val, mock.Mock):
+                    ctx.enter_context(mock.patch.object(setup_module, name, val))
+                else:
+                    ctx.enter_context(mock.patch.object(setup_module, name, val))
+            with ctx:
+                return setup_module.main()
+
+    def test_install_global_calls_setup_global(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = self._make_minimal_source(Path(td))
+            sg_mock = mock.Mock(return_value=0)
+            rc = self._run(
+                ["install-global"],
+                source_root=source,
+                extra_patches={"setup_global": sg_mock},
+            )
+            self.assertEqual(rc, 0)
+            sg_mock.assert_called_once_with(setup_module.Operation.INSTALL, source)
+
+    def test_uninstall_global_calls_setup_global_uninstall(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = self._make_minimal_source(Path(td))
+            sg_mock = mock.Mock(return_value=0)
+            rc = self._run(
+                ["uninstall-global"],
+                source_root=source,
+                extra_patches={"setup_global": sg_mock},
+            )
+            self.assertEqual(rc, 0)
+            sg_mock.assert_called_once_with(setup_module.Operation.UNINSTALL, source)
+
+    def test_update_treated_as_install_from_conf(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            conf = root / ".tamago" / "tamago.conf"
+            conf.parent.mkdir(parents=True)
+            conf.write_text('[agents]\n')
+
+            ifc_mock = mock.Mock(return_value=0)
+            with mock.patch("sys.argv", ["setup.py", "update"]):
+                with mock.patch("pathlib.Path.cwd", return_value=root):
+                    with mock.patch.object(setup_module, "resolve_source_root", return_value=source):
+                        with mock.patch.object(setup_module, "pull_repo"):
+                            with mock.patch.object(setup_module, "install_from_conf", ifc_mock):
+                                setup_module.main()
+
+            ifc_mock.assert_called_once()
+            _, kwargs = ifc_mock.call_args
+            self.assertTrue(kwargs.get("pull_cached_skills"))
+
+    def test_doctor_calls_run_health_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = self._make_minimal_source(Path(td))
+            hc_mock = mock.Mock()
+            rc = self._run(
+                ["doctor"],
+                source_root=source,
+                extra_patches={"run_health_check": hc_mock},
+            )
+            self.assertEqual(rc, 0)
+            hc_mock.assert_called_once()
+
+    def test_install_without_conf_returns_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            # No tamago.conf in cwd
+            with mock.patch("sys.argv", ["setup.py", "install"]):
+                with mock.patch("pathlib.Path.cwd", return_value=root):
+                    with mock.patch.object(setup_module, "resolve_source_root", return_value=source):
+                        with mock.patch.object(setup_module, "pull_repo"):
+                            rc = setup_module.main()
+            self.assertEqual(rc, 1)
+
+    def test_resolve_source_root_error_returns_1(self):
+        with mock.patch("sys.argv", ["setup.py", "install-global"]):
+            with mock.patch.object(
+                setup_module, "resolve_source_root",
+                side_effect=ValueError("not found"),
+            ):
+                rc = setup_module.main()
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
