@@ -3344,6 +3344,229 @@ class GlobalAgentScopeTests(unittest.TestCase):
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
 
 
+class SkillScopeRoutingTests(unittest.TestCase):
+    """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
+
+    def _make_source(self, root: Path, tamago_skills: list[str]) -> Path:
+        source = root / "tamago"
+        (source / "skills").mkdir(parents=True)  # always create skills dir
+        for name in tamago_skills:
+            (source / "skills" / name).mkdir(parents=True)
+        return source
+
+    def _make_profile(self, root: Path, profile_skills: list[str]) -> Path:
+        profile = root / "profile"
+        (profile / "skills").mkdir(parents=True)  # always create skills dir
+        for name in profile_skills:
+            (profile / "skills" / name).mkdir(parents=True)
+        return profile
+
+    def _fake_expanduser(self, root: Path):
+        """Return a fake_expanduser that redirects ~ to root/home."""
+        orig = Path.expanduser
+
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+
+        return fake
+
+    def test_tamago_builtin_goes_global_when_agent_is_project_scoped(self):
+        """Tamago built-in skills always go to ~/.claude/skills/ even with a project-scoped agent."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["tts", "daily-briefing"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    has_global_agent=False,  # all agents are project-scoped
+                )
+
+            self.assertTrue((home_claude_skills / "tts").is_symlink())
+            self.assertTrue((home_claude_skills / "daily-briefing").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "tts").exists())
+            self.assertFalse((project / ".claude" / "skills" / "daily-briefing").exists())
+
+    def test_tamago_builtin_goes_global_when_agent_is_global_scoped(self):
+        """Tamago built-in skills go to ~/.claude/skills/ when agent is global-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["tts"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    has_global_agent=True,
+                )
+
+            self.assertTrue((home_claude_skills / "tts").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "tts").exists())
+
+    def test_profile_skill_goes_global_when_agent_is_global_scoped(self):
+        """Profile skills go to ~/.claude/skills/ when the agent is global-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, [])
+            profile = self._make_profile(root, ["agent-skill"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    has_global_agent=True,
+                )
+
+            self.assertTrue((home_claude_skills / "agent-skill").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "agent-skill").exists())
+
+    def test_profile_skill_goes_project_when_agent_is_project_scoped(self):
+        """Profile skills go to project/.claude/skills/ when the agent is project-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, [])
+            profile = self._make_profile(root, ["agent-skill"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    has_global_agent=False,
+                )
+
+            self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
+            self.assertFalse((home_claude_skills / "agent-skill").exists())
+
+    def test_both_sources_with_project_scoped_agent(self):
+        """Tamago built-ins global, profile skills project when agent is project-scoped."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["builtin-skill"])
+            profile = self._make_profile(root, ["agent-skill"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    has_global_agent=False,
+                )
+
+            # Tamago built-in → global
+            self.assertTrue((home_claude_skills / "builtin-skill").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "builtin-skill").exists())
+            # Profile skill → project
+            self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
+            self.assertFalse((home_claude_skills / "agent-skill").exists())
+
+    def test_explicit_project_scope_overrides_tamago_builtin_default(self):
+        """scope="project" in [[skills]] forces a tamago built-in to project level."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["tts"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    project_scoped_skills={"tts"},
+                    has_global_agent=False,
+                )
+
+            self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
+            self.assertFalse((home_claude_skills / "tts").exists())
+
+    def test_explicit_project_scope_overrides_profile_skill_on_global_agent(self):
+        """scope="project" in [[skills]] forces a profile skill to project even for global agent."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, [])
+            profile = self._make_profile(root, ["agent-skill"])
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    project_scoped_skills={"agent-skill"},
+                    has_global_agent=True,
+                )
+
+            self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
+            self.assertFalse((home_claude_skills / "agent-skill").exists())
+
+    def test_profile_shadows_tamago_builtin_project_agent_goes_project(self):
+        """When profile shadows a tamago built-in, profile rules apply: project agent → project."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["tts"])      # tamago built-in
+            profile = self._make_profile(root, ["tts"])    # profile shadows it
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    has_global_agent=False,
+                )
+
+            # Profile version used, profile rules apply → project scope
+            self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
+            self.assertFalse((home_claude_skills / "tts").exists())
+
+    def test_profile_shadows_tamago_builtin_global_agent_goes_global(self):
+        """When profile shadows a tamago built-in, profile rules apply: global agent → global."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["tts"])      # tamago built-in
+            profile = self._make_profile(root, ["tts"])    # profile shadows it
+            project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    has_global_agent=True,
+                )
+
+            # Profile version used, profile rules apply → global scope
+            self.assertTrue((home_claude_skills / "tts").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "tts").exists())
+
+
 class DisableSkillTests(unittest.TestCase):
     """Tests for disable=true in [[skills]] entries."""
 
