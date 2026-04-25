@@ -2245,14 +2245,7 @@ def resolve_profile_root(
         clone_dir = source_root / repo_name
         if clone_dir.is_dir() and (clone_dir / ".git").exists():
             print(f"exists  {clone_dir}  (pulling latest)")
-            result = subprocess.run(
-                ["git", "-C", str(clone_dir), "pull", "--rebase"],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                raise ValueError(
-                    f"git pull failed in {clone_dir}:\n{result.stderr.strip()}"
-                )
+            pull_repo(clone_dir, "profile")
         elif clone_dir.exists():
             raise ValueError(
                 f"Directory exists but is not a git repo: {clone_dir}\n"
