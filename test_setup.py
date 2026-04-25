@@ -1,7 +1,9 @@
+import atexit
 import contextlib
 import importlib.util
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,42 @@ assert SPEC.loader is not None
 # via sys.modules.get(cls.__module__) — without this the import crashes.
 sys.modules["assistant_setup"] = setup_module
 SPEC.loader.exec_module(setup_module)
+
+# ---------------------------------------------------------------------------
+# Registry isolation — redirect project-registry writes to a temp file so that
+# test runs never pollute ~/.tamago/known-projects.json.
+#
+# add_project_to_registry and remove_project_from_registry both have
+#   registry_path: Path = KNOWN_PROJECTS_FILE
+# as a default argument (baked in at function-definition time).  We monkey-
+# patch the two functions so that any call that uses the real default path is
+# silently redirected to a temporary file that is deleted at process exit.
+# Tests that explicitly pass their own registry_path are unaffected.
+# ---------------------------------------------------------------------------
+
+_REAL_REGISTRY = setup_module.KNOWN_PROJECTS_FILE
+_REGISTRY_TMPDIR = tempfile.mkdtemp(prefix="tamago_test_registry_")
+_TEST_REGISTRY = Path(_REGISTRY_TMPDIR) / "known-projects.json"
+atexit.register(shutil.rmtree, _REGISTRY_TMPDIR, True)
+
+_orig_add_project = setup_module.add_project_to_registry
+_orig_remove_project = setup_module.remove_project_from_registry
+
+
+def _isolated_add(project_root: Path, registry_path: Path = _REAL_REGISTRY) -> None:
+    if registry_path == _REAL_REGISTRY:
+        registry_path = _TEST_REGISTRY
+    return _orig_add_project(project_root, registry_path)
+
+
+def _isolated_remove(project_root: Path, registry_path: Path = _REAL_REGISTRY) -> None:
+    if registry_path == _REAL_REGISTRY:
+        registry_path = _TEST_REGISTRY
+    return _orig_remove_project(project_root, registry_path)
+
+
+setup_module.add_project_to_registry = _isolated_add
+setup_module.remove_project_from_registry = _isolated_remove
 
 
 class UnlinkPathsTests(unittest.TestCase):
