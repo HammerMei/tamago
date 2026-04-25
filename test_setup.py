@@ -3377,17 +3377,28 @@ class DisableSkillTests(unittest.TestCase):
             root = Path(td)
             source = self._make_source(root, ["keep-skill", "skip-skill"])
             project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
 
-            setup_module.setup_skills(
-                setup_module.Operation.INSTALL,
-                source,
-                project,
-                disabled_skills={"skip-skill"},
-            )
+            orig_expanduser = Path.expanduser
 
-            self.assertTrue((project / ".claude" / "skills" / "keep-skill").is_symlink())
-            self.assertFalse((project / ".claude" / "skills" / "skip-skill").exists())
-            self.assertFalse((project / ".opencode" / "skills" / "skip-skill").exists())
+            def fake_expanduser(self):
+                s = str(self)
+                if s.startswith("~"):
+                    return Path(str(root / "home") + s[1:])
+                return orig_expanduser(self)
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                setup_module.setup_skills(
+                    setup_module.Operation.INSTALL,
+                    source,
+                    project,
+                    disabled_skills={"skip-skill"},
+                )
+
+            # Built-in skills always go to global ~/.claude/skills/
+            self.assertTrue((home_claude_skills / "keep-skill").is_symlink())
+            self.assertFalse((home_claude_skills / "skip-skill").exists())
+            self.assertFalse((root / "home" / ".opencode" / "skills" / "skip-skill").exists())
 
     def test_existing_symlink_removed_when_skill_disabled(self):
         """If a skill is disabled after having been installed, the old symlink is removed."""
@@ -3395,22 +3406,32 @@ class DisableSkillTests(unittest.TestCase):
             root = Path(td)
             source = self._make_source(root, ["my-skill"])
             project = root / "project"
+            home_claude_skills = root / "home" / ".claude" / "skills"
 
-            # First install without disable
-            setup_module.setup_skills(setup_module.Operation.INSTALL, source, project)
-            self.assertTrue((project / ".claude" / "skills" / "my-skill").is_symlink())
+            orig_expanduser = Path.expanduser
 
-            # Re-install with disable
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                setup_module.setup_skills(
-                    setup_module.Operation.INSTALL,
-                    source,
-                    project,
-                    disabled_skills={"my-skill"},
-                )
-            self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
-            self.assertFalse((project / ".opencode" / "skills" / "my-skill").exists())
+            def fake_expanduser(self):
+                s = str(self)
+                if s.startswith("~"):
+                    return Path(str(root / "home") + s[1:])
+                return orig_expanduser(self)
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                # First install without disable
+                setup_module.setup_skills(setup_module.Operation.INSTALL, source, project)
+                self.assertTrue((home_claude_skills / "my-skill").is_symlink())
+
+                # Re-install with disable
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    setup_module.setup_skills(
+                        setup_module.Operation.INSTALL,
+                        source,
+                        project,
+                        disabled_skills={"my-skill"},
+                    )
+            self.assertFalse((home_claude_skills / "my-skill").exists())
+            self.assertFalse((root / "home" / ".opencode" / "skills" / "my-skill").exists())
             self.assertIn("disabled", out.getvalue())
 
     def test_disabled_external_skill_removes_symlink_and_skips_clone(self):
