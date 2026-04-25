@@ -64,33 +64,32 @@ else
   HAS_PROFILE=false
 fi
 
-# ─── Agent name (dynamic — read from profile settings) ───────────────────────
+# ─── Agent name, scope, disable — read directly from tamago.conf ─────────────
 
-AGENT_SETTINGS="$PROFILE_REPO/settings/claude/settings.json"
-if [ -f "$AGENT_SETTINGS" ]; then
-  AGENT_NAME=$(python3 -c "import json; print(json.load(open('$AGENT_SETTINGS')).get('agent',''))" 2>/dev/null || echo "")
-else
-  AGENT_NAME=""
-fi
-
-# Read agent scope and disable status from tamago.conf
+AGENT_NAME=""
 AGENT_SCOPE="project"
 AGENT_DISABLED="false"
-if [ -f "$PROJECT_CONF" ] && [ -n "$AGENT_NAME" ]; then
-  _scope_out=$(python3 - "$PROJECT_CONF" "$AGENT_NAME" <<'PY' 2>/dev/null
-import sys, tomllib
-conf_path, name = sys.argv[1], sys.argv[2]
+if [ -f "$PROJECT_CONF" ]; then
+  _agent_out=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+conf_path = sys.argv[1]
 with open(conf_path, 'rb') as f:
     conf = tomllib.load(f)
-for a in conf.get('agents', []):
-    if a.get('name') == name:
-        print(a.get('scope', 'project'), str(a.get('disable', False)).lower())
-        break
+agents = conf.get('agents', [])
+if agents:
+    a = agents[0]
+    print(a.get('name', ''), a.get('scope', 'project'), str(a.get('disable', False)).lower())
 else:
-    print('project false')
+    print('', 'project', 'false')
 PY
-  ) || _scope_out="project false"
-  read -r AGENT_SCOPE AGENT_DISABLED <<< "$_scope_out"
+  ) || _agent_out=""
+  if [ -n "$_agent_out" ]; then
+    read -r AGENT_NAME AGENT_SCOPE AGENT_DISABLED <<< "$_agent_out"
+  fi
 fi
 
 # ─── Colors (only when printing to terminal, not in JSON mode) ────────────────
@@ -273,7 +272,7 @@ elif [ -n "$AGENT_NAME" ]; then
     && pass "memory dir" "$AGENT_NAME/" \
     || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/$AGENT_NAME"
 else
-  warn "memory dir" "no agent name in profile settings — skipping"
+  warn "memory dir" "no agent name in tamago.conf — skipping"
 fi
 
 # ─── 3. Global Settings (patch+merge — not symlinks) ─────────────────────────
@@ -448,7 +447,7 @@ PY
       check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
     fi
   else
-    warn "agent symlinks" "no agent name in profile settings — skipping"
+    warn "agent symlinks" "no agent name in tamago.conf — skipping"
   fi
 else
   warn "project dir" "not found: $PROJECT_DIR — skipping symlink checks"
