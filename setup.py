@@ -1080,13 +1080,17 @@ def setup_skills(
     profile_root: Path | None = None,
     disabled_skills: "set[str] | None" = None,
     project_scoped_skills: "set[str] | None" = None,
+    has_global_agent: bool = False,
 ):
-    """Symlink skills into ~/.claude/skills/ (global default) or project_root (project-scoped).
+    """Symlink skills into the appropriate location based on agent scope.
 
-    Built-in tamago and profile skills are global by default — installed to ~/.claude/skills/
-    and ~/.opencode/skills/ so they are accessible from any project when using a global agent.
-    Individual skills can be kept at project level by listing them in [[skills]] with
-    scope="project" in tamago.conf.
+    When has_global_agent=True (any configured agent has scope="global"), built-in tamago
+    and profile skills are installed to ~/.claude/skills/ and ~/.opencode/skills/ so they
+    are accessible from any project. Individual skills can be kept at project level by
+    listing them with scope="project" in [[skills]] in tamago.conf.
+
+    When has_global_agent=False (all agents are project-scoped), all skills install into
+    project_root/.claude/skills/ (the original behavior).
 
     Skills come from two sources (profile skills take precedence over tamago skills):
       1. tamago/skills/  — built-in skills bundled with tamago
@@ -1095,7 +1099,7 @@ def setup_skills(
     When both sources contain a skill with the same name, the profile version wins.
     disabled_skills:       names to skip entirely (remove existing symlinks on INSTALL).
     project_scoped_skills: built-in/profile skill names with an explicit scope="project" in
-                           tamago.conf — installed at project level instead of globally.
+                           tamago.conf — installed at project level even when agent is global.
     """
     if disabled_skills is None:
         disabled_skills = set()
@@ -1128,10 +1132,16 @@ def setup_skills(
         d for d in tamago_skill_dirs if d.name not in profile_skill_names
     ] + profile_skill_dirs
 
-    # Partition: disabled | project-scoped (explicit override) | global (default)
     enabled_skill_dirs = [d for d in merged_skill_dirs if d.name not in disabled_skills]
-    global_skill_dirs = [d for d in enabled_skill_dirs if d.name not in project_scoped_skills]
-    local_skill_dirs = [d for d in enabled_skill_dirs if d.name in project_scoped_skills]
+
+    if has_global_agent:
+        # Global agent: partition into global (default) vs project-scoped (explicit override)
+        global_skill_dirs = [d for d in enabled_skill_dirs if d.name not in project_scoped_skills]
+        local_skill_dirs = [d for d in enabled_skill_dirs if d.name in project_scoped_skills]
+    else:
+        # Project-scoped agent: all skills stay at project level regardless of scope field
+        global_skill_dirs = []
+        local_skill_dirs = enabled_skill_dirs
 
     if operation == Operation.INSTALL:
         # Remove disabled skills from all possible locations
@@ -1143,19 +1153,20 @@ def setup_skills(
                     target.unlink()
                     print(f"removed {target} (disabled)")
 
-        # Remove project-level symlinks for skills moving to global scope
-        for d in global_skill_dirs:
-            for skills_root in (project_claude_skills, project_opencode_skills):
-                target = skills_root / d.name
-                if target.is_symlink():
-                    target.unlink()
-                    print(f"removed {target} (moved to global scope)")
+        if has_global_agent:
+            # Remove project-level symlinks for skills moving to global scope
+            for d in global_skill_dirs:
+                for skills_root in (project_claude_skills, project_opencode_skills):
+                    target = skills_root / d.name
+                    if target.is_symlink():
+                        target.unlink()
+                        print(f"removed {target} (moved to global scope)")
 
-        # Global-by-default: install to ~/.claude/skills/ and ~/.opencode/skills/
-        symlink_paths(global_skill_dirs, home_claude_skills)
-        symlink_paths(global_skill_dirs, home_opencode_skills)
+            # Install globally
+            symlink_paths(global_skill_dirs, home_claude_skills)
+            symlink_paths(global_skill_dirs, home_opencode_skills)
 
-        # Project-scoped: explicit scope="project" override in tamago.conf
+        # Install project-scoped skills (either explicit override, or all when agent is project-scoped)
         symlink_paths(local_skill_dirs, project_claude_skills)
         symlink_paths(local_skill_dirs, project_opencode_skills)
 
@@ -1490,7 +1501,7 @@ def setup(
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, project_scoped_skills)
+        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, project_scoped_skills, has_global_agent=bool(global_agents))
         setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, global_agents=global_agents)
         setup_settings(operation, source_root, project_root, profile_root, install_globally=bool(global_agents))
 

@@ -305,11 +305,15 @@ if [ -d "$PROJECT_DIR" ]; then
     warn ".tamago/machine.toml" "missing — re-run: tamago install  (pre-Slice-E install)"
   fi
 
-  # Read project-scoped skill overrides from tamago.conf
-  # Built-in/profile skills default to global (~/.claude/skills/); scope="project" keeps them local.
-  PROJECT_SCOPED_SKILLS=()
-  if [ -f "$PROJECT_CONF" ]; then
-    _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
+  # Check skills — location depends on agent scope:
+  #   global agent  → ~/.claude/skills/ by default; scope="project" in conf → project dir
+  #   project agent → project dir always
+  if [ -d "$REPO/skills" ] || { [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; }; then
+
+    # Read project-scoped skill overrides from tamago.conf (only relevant for global agents)
+    PROJECT_SCOPED_SKILLS=()
+    if [ "$AGENT_SCOPE" = "global" ] && [ -f "$PROJECT_CONF" ]; then
+      _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
 import sys, tomllib
 with open(sys.argv[1], 'rb') as f:
     conf = tomllib.load(f)
@@ -319,44 +323,44 @@ for s in conf.get('skills', []):
             and not s.get('disable', False)):
         print(s['name'])
 PY
-    ) || _pss=""
-    while IFS= read -r _line; do
-      [ -n "$_line" ] && PROJECT_SCOPED_SKILLS+=("$_line")
-    done <<< "$_pss"
-  fi
+      ) || _pss=""
+      while IFS= read -r _line; do
+        [ -n "$_line" ] && PROJECT_SCOPED_SKILLS+=("$_line")
+      done <<< "$_pss"
+    fi
 
-  _is_project_scoped() {
-    local _name="$1"
-    for _s in "${PROJECT_SCOPED_SKILLS[@]+"${PROJECT_SCOPED_SKILLS[@]}"}"; do
-      [ "$_s" = "$_name" ] && return 0
-    done
-    return 1
-  }
+    _is_project_scoped() {
+      local _name="$1"
+      for _s in "${PROJECT_SCOPED_SKILLS[@]+"${PROJECT_SCOPED_SKILLS[@]}"}"; do
+        [ "$_s" = "$_name" ] && return 0
+      done
+      return 1
+    }
 
-  # Check tamago built-in skills (global by default)
-  if [ -d "$REPO/skills" ]; then
-    for _skill_dir in "$REPO/skills"/*/; do
-      [ -d "$_skill_dir" ] || continue
-      _skill_name=$(basename "$_skill_dir")
-      if _is_project_scoped "$_skill_name"; then
-        check_symlink "$PROJECT_DIR/.claude/skills/$_skill_name" ".claude/skills/$_skill_name"
+    _check_skill() {
+      local _name="$1"
+      if [ "$AGENT_SCOPE" = "global" ] && ! _is_project_scoped "$_name"; then
+        check_symlink "$HOME/.claude/skills/$_name" "~/.claude/skills/$_name"
       else
-        check_symlink "$HOME/.claude/skills/$_skill_name" "~/.claude/skills/$_skill_name"
+        check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
       fi
-    done
-  fi
+    }
 
-  # Check profile-specific skills (global by default)
-  if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
-    for _skill_dir in "$PROFILE_REPO/skills"/*/; do
-      [ -d "$_skill_dir" ] || continue
-      _skill_name=$(basename "$_skill_dir")
-      if _is_project_scoped "$_skill_name"; then
-        check_symlink "$PROJECT_DIR/.claude/skills/$_skill_name" ".claude/skills/$_skill_name"
-      else
-        check_symlink "$HOME/.claude/skills/$_skill_name" "~/.claude/skills/$_skill_name"
-      fi
-    done
+    # Check tamago built-in skills
+    if [ -d "$REPO/skills" ]; then
+      for _skill_dir in "$REPO/skills"/*/; do
+        [ -d "$_skill_dir" ] || continue
+        _check_skill "$(basename "$_skill_dir")"
+      done
+    fi
+
+    # Check profile-specific skills
+    if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
+      for _skill_dir in "$PROFILE_REPO/skills"/*/; do
+        [ -d "$_skill_dir" ] || continue
+        _check_skill "$(basename "$_skill_dir")"
+      done
+    fi
   fi
 
   if [ "$HAS_PROFILE" = false ]; then
