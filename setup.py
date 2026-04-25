@@ -769,17 +769,23 @@ def _read_tamago_source_perms(source_settings: dict) -> list[str]:
     return source_settings.get("permissions", {}).get("allow", [])
 
 
+def _read_tamago_source_additional_dirs(source_settings: dict) -> list[str]:
+    """Extract permissions.additionalDirectories list from tamago source settings."""
+    return source_settings.get("permissions", {}).get("additionalDirectories", [])
+
+
 def patch_settings(
     path: Path,
     hook_commands: dict[str, list[str]],
     perms: list[str],
     status_line: dict | None,
     manifest_path: Path,
+    additional_dirs: list[str] | None = None,
 ) -> None:
-    """Patch a Claude Code settings.json with tamago entries (hooks, perms, statusLine).
+    """Patch a Claude Code settings.json with tamago entries (hooks, perms, statusLine, additionalDirectories).
 
     Idempotent: entries already present are skipped (dedup by exact command string
-    for hooks, set membership for perms).
+    for hooks, set membership for perms/additionalDirectories).
 
     Migration: if path is a symlink, it is converted to a regular file first so
     subsequent user edits (or tamago source changes) are independent.
@@ -811,11 +817,14 @@ def patch_settings(
 
     changed = False
 
+    additional_dirs = additional_dirs or []
+
     # Load existing manifest (cumulative — re-installs must not wipe prior injection record)
     _empty_manifest: dict = {
         "injected_perms": [],
         "injected_hooks": {},
         "injected_status_line": False,
+        "injected_additional_dirs": [],
     }
     if manifest_path.exists():
         try:
@@ -823,6 +832,7 @@ def patch_settings(
             manifest.setdefault("injected_perms", [])
             manifest.setdefault("injected_hooks", {})
             manifest.setdefault("injected_status_line", False)
+            manifest.setdefault("injected_additional_dirs", [])
         except (OSError, ValueError):
             manifest = _empty_manifest
     else:
@@ -851,6 +861,10 @@ def patch_settings(
                     injected.append(cmd)
         if status_line is not None and current.get("statusLine") == status_line:
             manifest["injected_status_line"] = True
+        already_add_dirs = set(current.get("permissions", {}).get("additionalDirectories", []))
+        for d in additional_dirs:
+            if d in already_add_dirs and d not in manifest["injected_additional_dirs"]:
+                manifest["injected_additional_dirs"].append(d)
 
     # 1. Permissions — set union (append new ones after existing, preserve order)
     existing_perms: list = current.get("permissions", {}).get("allow", [])
@@ -889,6 +903,15 @@ def patch_settings(
     if status_line is not None and "statusLine" not in current:
         current["statusLine"] = status_line
         manifest["injected_status_line"] = True
+        changed = True
+
+    # 4. additionalDirectories — set union (same dedup policy as perms)
+    existing_add_dirs: list = current.get("permissions", {}).get("additionalDirectories", [])
+    existing_add_dirs_set = set(existing_add_dirs)
+    dirs_to_add = [d for d in additional_dirs if d not in existing_add_dirs_set]
+    if dirs_to_add:
+        current.setdefault("permissions", {}).setdefault("additionalDirectories", []).extend(dirs_to_add)
+        manifest["injected_additional_dirs"].extend(dirs_to_add)
         changed = True
 
     # Write settings back only if something changed (avoid spurious reformatting)
@@ -974,6 +997,17 @@ def unpatch_settings(path: Path, manifest_path: Path) -> None:
         del current["statusLine"]
         changed = True
 
+    # 4. Remove injected additionalDirectories (exact string match only)
+    injected_add_dirs = set(manifest.get("injected_additional_dirs", []))
+    if injected_add_dirs and "permissions" in current and "additionalDirectories" in current["permissions"]:
+        new_add_dirs = [d for d in current["permissions"]["additionalDirectories"] if d not in injected_add_dirs]
+        if new_add_dirs != current["permissions"]["additionalDirectories"]:
+            if new_add_dirs:
+                current["permissions"]["additionalDirectories"] = new_add_dirs
+            else:
+                del current["permissions"]["additionalDirectories"]
+            changed = True
+
     if changed:
         path.write_text(json.dumps(current, indent=2) + "\n")
         print(f"unpatched {path}")
@@ -1004,8 +1038,9 @@ def patch_global_settings(operation: Operation, source_root: Path) -> None:
         )
         hook_commands = _read_tamago_source_hooks(source_settings)
         perms = _read_tamago_source_perms(source_settings)
+        additional_dirs = _read_tamago_source_additional_dirs(source_settings)
         status_line = source_settings.get("statusLine")
-        patch_settings(settings_path, hook_commands, perms, status_line, manifest_path)
+        patch_settings(settings_path, hook_commands, perms, status_line, manifest_path, additional_dirs)
     elif operation == Operation.UNINSTALL:
         unpatch_settings(settings_path, manifest_path)
 

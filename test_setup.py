@@ -1462,6 +1462,75 @@ class PatchSettingsTests(unittest.TestCase):
             self.assertNotIn(perm_a, remaining)
             self.assertNotIn(perm_b, remaining)
 
+    # ── additionalDirectories ─────────────────────────────────────────────────
+
+    def test_additional_dirs_injected_and_recorded_in_manifest(self):
+        """patch_settings injects additionalDirectories into permissions and records them in manifest."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            sm.patch_settings(path, {}, [], None, manifest, ["~/.claude/skills"])
+
+            data = json.loads(path.read_text())
+            self.assertEqual(data["permissions"]["additionalDirectories"], ["~/.claude/skills"])
+
+            man = json.loads(manifest.read_text())
+            self.assertIn("~/.claude/skills", man["injected_additional_dirs"])
+
+    def test_additional_dirs_dedup_skips_existing(self):
+        """If additionalDirectories entry already exists, patch_settings must not duplicate it."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+            path.write_text(json.dumps({
+                "permissions": {"additionalDirectories": ["~/.claude/skills"]}
+            }))
+
+            sm.patch_settings(path, {}, [], None, manifest, ["~/.claude/skills"])
+
+            data = json.loads(path.read_text())
+            self.assertEqual(data["permissions"]["additionalDirectories"].count("~/.claude/skills"), 1)
+
+    def test_unpatch_removes_injected_additional_dirs(self):
+        """unpatch_settings removes tamago-injected additionalDirectories, preserves user's."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+            # User already has their own additional dir
+            path.write_text(json.dumps({
+                "permissions": {"additionalDirectories": ["~/my-own-dir"]}
+            }))
+
+            sm.patch_settings(path, {}, [], None, manifest, ["~/.claude/skills"])
+
+            mid = json.loads(path.read_text())
+            self.assertIn("~/.claude/skills", mid["permissions"]["additionalDirectories"])
+            self.assertIn("~/my-own-dir", mid["permissions"]["additionalDirectories"])
+
+            sm.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            dirs = after.get("permissions", {}).get("additionalDirectories", [])
+            self.assertNotIn("~/.claude/skills", dirs)
+            self.assertIn("~/my-own-dir", dirs)
+
+    def test_unpatch_removes_key_when_all_dirs_were_tamago_injected(self):
+        """If all additionalDirectories came from tamago, the key is removed entirely on unpatch."""
+        with tempfile.TemporaryDirectory() as td:
+            import json
+            path = Path(td) / "settings.json"
+            manifest = Path(td) / "manifest.json"
+
+            sm.patch_settings(path, {}, [], None, manifest, ["~/.claude/skills"])
+            sm.unpatch_settings(path, manifest)
+
+            after = json.loads(path.read_text())
+            self.assertNotIn("additionalDirectories", after.get("permissions", {}))
+
 
 class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
     """Tests for patch_opencode_global_settings — mirrors Claude Code's patch approach."""
