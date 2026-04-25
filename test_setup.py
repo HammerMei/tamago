@@ -769,6 +769,47 @@ scope = "project"
             self.assertEqual(conf.skills[0].name, "text-to-speech")
             self.assertEqual(conf.skills[0].scope, "project")
 
+    def test_skill_source_tilde_expanded(self):
+        """~/path in [[skills]] source= is expanded to an absolute path at parse time."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            self._write_toml(p, """
+[[skills]]
+name = "daily-briefing"
+source = "~/git.repos/skills.git"
+path = "daily-briefing"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            skill = conf.skills[0]
+            # Must be an absolute path — no leading tilde
+            self.assertFalse(skill.source.startswith("~"), f"source not expanded: {skill.source}")
+            self.assertTrue(skill.source.startswith("/"), f"source not absolute: {skill.source}")
+            self.assertTrue(skill.source.endswith("git.repos/skills.git"))
+
+    def test_skill_source_git_url_not_mangled(self):
+        """git@ and https:// URLs in source= are not altered by expanduser."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            self._write_toml(p, """
+[[skills]]
+name = "s1"
+source = "git@github.com:user/repo.git"
+
+[[skills]]
+name = "s2"
+source = "https://github.com/user/repo.git"
+
+[[skills]]
+name = "s3"
+source = "user@10.0.0.1:~/git.repos/repo.git"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertEqual(conf.skills[0].source, "git@github.com:user/repo.git")
+            self.assertEqual(conf.skills[1].source, "https://github.com/user/repo.git")
+            # SSH scp-style URL where ~ appears after the colon — must NOT be expanded
+            self.assertEqual(conf.skills[2].source, "user@10.0.0.1:~/git.repos/repo.git")
+
 
 class MachineEnvTests(unittest.TestCase):
     """Tests for write_machine_env (shell bridge file)."""
@@ -4785,8 +4826,12 @@ class SetupSkillsBinAndUninstallTests(unittest.TestCase):
             self.assertFalse((home_claude_skills / "tts").exists())
             self.assertFalse((local_bin / "tts-cli.py").exists())
 
-    def test_project_scoped_skill_bin_removed_from_local_bin_on_scope_change(self):
-        """When a global skill is re-scoped to project, its ~/.local/bin entry is removed."""
+    def test_project_scoped_skill_bin_stays_in_local_bin(self):
+        """bin/ tools are installed to ~/.local/bin regardless of skill scope.
+
+        A skill's bin/ directory contains system-level CLI tools (e.g. tts-cli.py)
+        that must remain on PATH even when the skill itself is project-scoped.
+        """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source_with_bin_skill(root, "tts")
@@ -4794,21 +4839,15 @@ class SetupSkillsBinAndUninstallTests(unittest.TestCase):
             local_bin = root / "home" / ".local" / "bin"
 
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
-                # First install: global
-                sm.setup_skills(
-                    sm.Operation.INSTALL, source, project,
-                    has_global_agent=False,
-                )
-                self.assertTrue((local_bin / "tts-cli.py").is_symlink())
-
-                # Re-install: now project-scoped via override
+                # Install with project scope
                 sm.setup_skills(
                     sm.Operation.INSTALL, source, project,
                     project_scoped_skills={"tts"},
                     has_global_agent=False,
                 )
 
-            self.assertFalse((local_bin / "tts-cli.py").exists())
+            # bin entry must still be present even though skill is project-scoped
+            self.assertTrue((local_bin / "tts-cli.py").is_symlink())
             self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
 
     def test_stale_project_symlink_removed_when_skill_moves_to_global(self):

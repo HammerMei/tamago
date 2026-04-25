@@ -276,7 +276,7 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
         skills = [
             SkillEntry(
                 name=s["name"],
-                source=s.get("source", "tamago"),
+                source=os.path.expanduser(s.get("source", "tamago")),
                 scope=s.get("scope", "global"),
                 path=s.get("path"),
                 disable=s.get("disable", False),
@@ -1430,17 +1430,6 @@ def setup_skills(
         symlink_paths(global_skill_dirs, home_claude_skills)
         symlink_paths(global_skill_dirs, home_opencode_skills)
 
-        # Install CLI entry points to ~/.local/bin for global skills that have a bin/ dir
-        for d in global_skill_dirs:
-            skill_bin = d / "bin"
-            if skill_bin.is_dir():
-                bin_files = [
-                    f for f in sorted(skill_bin.iterdir())
-                    if not f.name.startswith(".") and not f.is_dir()
-                ]
-                if bin_files:
-                    symlink_paths(bin_files, local_bin)
-
         # Remove global symlinks for skills moving to project scope
         for d in local_skill_dirs:
             for skills_root in (home_claude_skills, home_opencode_skills):
@@ -1453,17 +1442,18 @@ def setup_skills(
         symlink_paths(local_skill_dirs, project_claude_skills)
         symlink_paths(local_skill_dirs, project_opencode_skills)
 
-        # Remove ~/.local/bin entries for skills that moved from global to project scope
-        for d in local_skill_dirs:
+        # Install CLI entry points to ~/.local/bin for ALL enabled skills that have a bin/ dir.
+        # bin/ contains system-level CLI tools (e.g. tts-cli.py) that must be on PATH
+        # regardless of whether the skill itself is installed globally or project-scoped.
+        for d in all_enabled_dirs:
             skill_bin = d / "bin"
             if skill_bin.is_dir():
-                for f in sorted(skill_bin.iterdir()):
-                    if f.name.startswith(".") or f.is_dir():
-                        continue
-                    target = local_bin / f.name
-                    if target.is_symlink():
-                        target.unlink()
-                        print(f"removed {target} (moved to project scope)")
+                bin_files = [
+                    f for f in sorted(skill_bin.iterdir())
+                    if not f.name.startswith(".") and not f.is_dir()
+                ]
+                if bin_files:
+                    symlink_paths(bin_files, local_bin)
 
     elif operation == Operation.UNINSTALL:
         # Remove from all possible locations (handles scope changes between installs)
