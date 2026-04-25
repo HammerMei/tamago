@@ -4,8 +4,7 @@
 Creates a profile directory with:
   - agents/<name>.persona.md
   - agents/memory/<name>/MEMORY.md
-  - settings/claude/settings.json  (profile overrides only — no "agent" key)
-  - settings/opencode/opencode.json
+  - settings/claude/agent-emojis.json
   - .gitignore
 
 Then writes .tamago/tamago.conf into the project directory and runs
@@ -243,19 +242,6 @@ def create_profile(
         else "secrets/\n*.kdbx\n*.key\n.DS_Store\n"
     )
 
-    # Profile settings contain only plugin-level overrides (permissions, hooks, etc.).
-    # The "agent" / "default_agent" pointer is now contributed by tamago's setup_settings
-    # step when it reads the agent name from tamago.conf — no need to duplicate it here.
-    claude_settings_content = json.dumps(
-        {"$schema": "https://json.schemastore.org/claude-code-settings.json"},
-        indent=2,
-    ) + "\n"
-
-    opencode_settings_content = json.dumps(
-        {"$schema": "https://opencode.ai/config.json"},
-        indent=2,
-    ) + "\n"
-
     agent_emojis_content = json.dumps({name: emoji}, indent=2) + "\n"
 
     birth_cert_content = build_birth_certificate(
@@ -274,9 +260,7 @@ def create_profile(
         (profile_dir / "agents" / f"{name}.persona.md", persona_content),
         (profile_dir / "agents" / "memory" / name / "MEMORY.md", memory_content),
         (profile_dir / "agents" / "memory" / name / "birth_certificate.md", birth_cert_content),
-        (profile_dir / "settings" / "claude" / "settings.json", claude_settings_content),
         (profile_dir / "settings" / "claude" / "agent-emojis.json", agent_emojis_content),
-        (profile_dir / "settings" / "opencode" / "opencode.json", opencode_settings_content),
         (profile_dir / ".gitignore", gitignore_content),
     ]
 
