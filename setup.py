@@ -1527,8 +1527,30 @@ def setup_shell_env(operation: Operation, source_root: Path):
 # ---------------------------------------------------------------------------
 
 def pull_repo(path: Path, label: str) -> None:
-    """git pull --rebase on a repo; warn on failure, never block the install."""
+    """git pull --rebase on a repo; warn on failure, never block the install.
+
+    Skips silently when:
+    - path is not a git repo
+    - no remote is configured (e.g. freshly-hatched local-only profile)
+    - current branch has no upstream tracking branch set
+    """
     if not (path / ".git").exists():
+        return
+    # Check for any configured remote — no remote means nothing to pull from.
+    remote_check = subprocess.run(
+        ["git", "-C", str(path), "remote"],
+        capture_output=True, text=True,
+    )
+    if not remote_check.stdout.strip():
+        print(f"info    {label}: no remote configured — skipping pull")
+        return
+    # Check for an upstream tracking branch on the current branch.
+    upstream_check = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        capture_output=True, text=True,
+    )
+    if upstream_check.returncode != 0:
+        print(f"info    {label}: no upstream branch — skipping pull")
         return
     result = subprocess.run(
         ["git", "-C", str(path), "pull", "--rebase", "--quiet"],
