@@ -4734,20 +4734,21 @@ class SetupGlobalTests(unittest.TestCase):
         def ok(*a, **k):
             ran.append("ok")
 
-        # Patch the five steps: first one raises, rest succeed
+        # Patch the six steps: first one raises, rest succeed
         with (
             mock.patch.object(sm, "patch_global_settings", side_effect=boom),
             mock.patch.object(sm, "patch_opencode_global_settings", side_effect=ok),
             mock.patch.object(sm, "setup_shell_env", side_effect=ok),
             mock.patch.object(sm, "setup_git_hooks", side_effect=ok),
             mock.patch.object(sm, "setup_local_bin", side_effect=ok),
+            mock.patch.object(sm, "_setup_bootstrap_skill", side_effect=ok),
         ):
             rc = sm.setup_global(
                 sm.Operation.INSTALL, Path("/fake")
             )
 
         self.assertEqual(rc, 1)
-        self.assertEqual(len(ran), 4)  # all four non-failing steps ran
+        self.assertEqual(len(ran), 5)  # all five non-failing steps ran
 
     def test_all_steps_succeed_returns_0(self):
         noop = mock.Mock()
@@ -4757,11 +4758,71 @@ class SetupGlobalTests(unittest.TestCase):
             mock.patch.object(sm, "setup_shell_env", noop),
             mock.patch.object(sm, "setup_git_hooks", noop),
             mock.patch.object(sm, "setup_local_bin", noop),
+            mock.patch.object(sm, "_setup_bootstrap_skill", noop),
         ):
             rc = sm.setup_global(
                 sm.Operation.INSTALL, Path("/fake")
             )
         self.assertEqual(rc, 0)
+
+    def test_install_global_symlinks_hatch_skill_globally(self):
+        """setup_global INSTALL creates ~/.claude/skills/hatch symlink."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            hatch_dir = source / "skills" / "hatch"
+            hatch_dir.mkdir(parents=True)
+            fake_home = root / "home"
+
+            def fake_expanduser(self_path):
+                s = str(self_path)
+                if s.startswith("~"):
+                    return Path(s.replace("~", str(fake_home), 1))
+                return self_path
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                with (
+                    mock.patch.object(sm, "patch_global_settings"),
+                    mock.patch.object(sm, "patch_opencode_global_settings"),
+                    mock.patch.object(sm, "setup_shell_env"),
+                    mock.patch.object(sm, "setup_git_hooks"),
+                    mock.patch.object(sm, "setup_local_bin"),
+                ):
+                    sm.setup_global(sm.Operation.INSTALL, source)
+
+            self.assertTrue((fake_home / ".claude" / "skills" / "hatch").is_symlink())
+            self.assertTrue((fake_home / ".opencode" / "skills" / "hatch").is_symlink())
+
+    def test_uninstall_global_removes_hatch_skill_symlink(self):
+        """setup_global UNINSTALL removes the globally-installed hatch symlink."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            hatch_dir = source / "skills" / "hatch"
+            hatch_dir.mkdir(parents=True)
+            fake_home = root / "home"
+            # Pre-create the symlink
+            claude_skills = fake_home / ".claude" / "skills"
+            claude_skills.mkdir(parents=True)
+            (claude_skills / "hatch").symlink_to(hatch_dir)
+
+            def fake_expanduser(self_path):
+                s = str(self_path)
+                if s.startswith("~"):
+                    return Path(s.replace("~", str(fake_home), 1))
+                return self_path
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                with (
+                    mock.patch.object(sm, "patch_global_settings"),
+                    mock.patch.object(sm, "patch_opencode_global_settings"),
+                    mock.patch.object(sm, "setup_shell_env"),
+                    mock.patch.object(sm, "setup_git_hooks"),
+                    mock.patch.object(sm, "setup_local_bin"),
+                ):
+                    sm.setup_global(sm.Operation.UNINSTALL, source)
+
+            self.assertFalse((claude_skills / "hatch").exists())
 
 
 # ---------------------------------------------------------------------------

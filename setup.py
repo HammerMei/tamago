@@ -1759,9 +1759,29 @@ def setup_git_hooks(operation: Operation, source_root: Path) -> None:
         unlink_paths(hook_files, git_hooks_dir)
 
 
+def _setup_bootstrap_skill(operation: Operation, source_root: Path) -> None:
+    """Symlink the hatch skill globally so it is available before any project install.
+
+    Only 'hatch' is installed here — it is the only built-in skill needed during
+    the bootstrap phase (creating a first agent profile).  All other built-in
+    skills are installed on the first `tamago install` run via tamago.conf.
+    """
+    hatch_dir = source_root / "skills" / "hatch"
+    if not hatch_dir.is_dir():
+        return
+    home_claude_skills  = Path("~/.claude/skills").expanduser()
+    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    if operation == Operation.INSTALL:
+        symlink_paths([hatch_dir], home_claude_skills)
+        symlink_paths([hatch_dir], home_opencode_skills)
+    elif operation == Operation.UNINSTALL:
+        unlink_paths([hatch_dir], home_claude_skills)
+        unlink_paths([hatch_dir], home_opencode_skills)
+
+
 def setup_global(operation: Operation, source_root: Path) -> int:
     """Home-level install: patch ~/.claude/settings.json, patch ~/.opencode/opencode.json,
-    update ~/.zshrc, and install tamago's own git hooks.
+    update ~/.zshrc, install tamago's own git hooks, and bootstrap the hatch skill.
     Each step runs independently — one failure does not block the others."""
     errors: list[str] = []
 
@@ -1771,6 +1791,7 @@ def setup_global(operation: Operation, source_root: Path) -> int:
         lambda: setup_shell_env(operation, source_root),
         lambda: setup_git_hooks(operation, source_root),
         lambda: setup_local_bin(operation, source_root),
+        lambda: _setup_bootstrap_skill(operation, source_root),        # hatch skill globally
     ):
         try:
             step()
