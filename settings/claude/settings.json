@@ -2,6 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
+      "Bash(tts-cli.py *)",
       "Bash(python3 *.claude/skills/*.py *)",
       "Bash(python3 *.claude/skills/*/*.py *)",
       "Bash(ls .claude/skills*)",
