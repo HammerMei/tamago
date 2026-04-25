@@ -3533,7 +3533,8 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
 
     def _setup_env(self, root: Path, tamago_skills: list[str], profile_skills: list[str],
                    agent_scope: str = "project", agent_name: str = "test-agent",
-                   project_scoped_skills: list[str] | None = None) -> tuple[Path, Path, Path, Path]:
+                   project_scoped_skills: list[str] | None = None,
+                   disabled_skills: list[str] | None = None) -> tuple[Path, Path, Path, Path]:
         """Build a fake tamago/profile/home/project tree and return (tamago, profile, home, project)."""
         tamago = root / "tamago"
         profile = root / "profile"
@@ -3556,12 +3557,15 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
 
         # tamago.conf in project
         (project / ".tamago").mkdir(parents=True)
-        scoped_lines = ""
+        extra_skill_lines = ""
         if project_scoped_skills:
             for s in project_scoped_skills:
-                scoped_lines += f'\n[[skills]]\nname = "{s}"\nscope = "project"\n'
+                extra_skill_lines += f'\n[[skills]]\nname = "{s}"\nscope = "project"\n'
+        if disabled_skills:
+            for s in disabled_skills:
+                extra_skill_lines += f'\n[[skills]]\nname = "{s}"\ndisable = true\n'
         (project / ".tamago" / "tamago.conf").write_text(
-            f'[[agents]]\nname = "{agent_name}"\nscope = "{agent_scope}"\n{scoped_lines}'
+            f'[[agents]]\nname = "{agent_name}"\nscope = "{agent_scope}"\n{extra_skill_lines}'
         )
         # machine.env so health check knows the profile
         (project / ".tamago" / "machine.env").write_text(
@@ -3699,6 +3703,28 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
             data = _run_health_check(project, tamago, home, profile)
             self.assertEqual(_skill_result(data, "tts"), "pass",
                              f"Expected tts to pass at project level; full results: {data['results']}")
+
+    def test_disabled_skill_passes_without_symlink(self):
+        """Regression: disable=true in [[skills]] must not be flagged as missing.
+
+        Previously health-check.sh ignored the disable flag and checked the symlink
+        location, producing a false ❌ for intentionally-disabled skills.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root,
+                tamago_skills=["text-to-speech"],
+                profile_skills=[],
+                agent_scope="project",
+                disabled_skills=["text-to-speech"],
+            )
+            # Intentionally NOT installed anywhere — the skill is disabled
+
+            data = _run_health_check(project, tamago, home, profile)
+            result = _skill_result(data, "text-to-speech")
+            self.assertEqual(result, "pass",
+                             f"Expected text-to-speech to pass (disabled); full results: {data['results']}")
 
 
 class SkillScopeRoutingTests(unittest.TestCase):

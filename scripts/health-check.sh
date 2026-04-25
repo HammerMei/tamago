@@ -323,24 +323,37 @@ if [ -d "$PROJECT_DIR" ]; then
   #   when a profile skill shadows a tamago built-in, profile routing rules apply
   if [ -d "$REPO/skills" ] || { [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; }; then
 
-    # Read project-scoped skill overrides from tamago.conf (applies to all agent scopes)
+    # Read project-scoped and disabled skills from tamago.conf
     PROJECT_SCOPED_SKILLS=()
+    DISABLED_SKILLS=()
     if [ -f "$PROJECT_CONF" ]; then
       _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
 import sys, tomllib
 with open(sys.argv[1], 'rb') as f:
     conf = tomllib.load(f)
 for s in conf.get('skills', []):
-    if (s.get('source', 'tamago') in ('tamago', 'profile')
-            and s.get('scope', 'global') == 'project'
-            and not s.get('disable', False)):
-        print(s['name'])
+    src = s.get('source', 'tamago')
+    if s.get('disable', False):
+        print('disabled', s['name'])
+    elif src in ('tamago', 'profile') and s.get('scope', 'global') == 'project':
+        print('project', s['name'])
 PY
       ) || _pss=""
       while IFS= read -r _line; do
-        [ -n "$_line" ] && PROJECT_SCOPED_SKILLS+=("$_line")
+        case "$_line" in
+          "disabled "*) DISABLED_SKILLS+=("${_line#disabled }") ;;
+          "project "*)  PROJECT_SCOPED_SKILLS+=("${_line#project }") ;;
+        esac
       done <<< "$_pss"
     fi
+
+    _is_disabled() {
+      local _name="$1"
+      for _s in "${DISABLED_SKILLS[@]+"${DISABLED_SKILLS[@]}"}"; do
+        [ "$_s" = "$_name" ] && return 0
+      done
+      return 1
+    }
 
     _is_project_scoped() {
       local _name="$1"
@@ -370,8 +383,13 @@ PY
     #   IS_PROFILE_SKILL=true  → profile routing: global if agent is global, else project
     #   IS_PROFILE_SKILL=false → tamago built-in: always global
     # explicit scope="project" override always wins regardless of IS_PROFILE_SKILL
+    # disabled skills (disable=true in tamago.conf) are skipped entirely
     _check_skill() {
       local _name="$1" _is_profile="${2:-false}"
+      if _is_disabled "$_name"; then
+        pass "$_name" "disabled in tamago.conf — skipped"
+        return
+      fi
       if _is_project_scoped "$_name"; then
         check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
       elif [ "$_is_profile" = "true" ] && [ "$AGENT_SCOPE" != "global" ]; then
