@@ -1509,7 +1509,6 @@ def setup(
         if operation == Operation.INSTALL:
             agent_name = _detect_agent_name(profile_root)
             write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
-            run_health_check(source_root, project_root)
         elif operation == Operation.UNINSTALL:
             write_machine_env(machine_env, None, "")
 
@@ -1837,6 +1836,11 @@ def install_from_conf(
             machine_toml_path.unlink()
             print(f"removed {machine_toml_path}")
         remove_project_from_registry(project_root, registry_path)
+
+    # Run health check after everything is written — machine.toml must exist before
+    # the check runs, otherwise the first install always warns about it being missing.
+    if operation == Operation.INSTALL:
+        run_health_check(source_root, project_root)
 
     return rc
 
