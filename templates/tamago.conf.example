@@ -45,22 +45,28 @@ memory = true
 # Skills to symlink into this project.
 # name    — skill directory name
 # source  — "tamago" (built-in) or "profile" (from profile/skills/) [default: tamago]
-# scope   — "project" only (global skills not yet supported)         [default: global — warn]
+# scope   — "global"  → ~/.claude/skills/ (accessible from any project) [default: global]
+#            "project" → .claude/skills/ inside this project only
 # path    — override path (for source = "url" skills)                [optional]
 # disable — set to true to prevent installation and remove any
 #            existing symlink for this skill                         [default: false]
+#
+# Built-in (tamago) and profile skills are global by default — no [[skills]] entry
+# needed unless you want to opt out (disable = true) or keep a skill project-local
+# (scope = "project").
 
-[[skills]]
-name   = "text-to-speech"
-source = "tamago"
-scope  = "project"
+# Example: keep a skill project-local instead of global
+# [[skills]]
+# name   = "text-to-speech"
+# source = "tamago"
+# scope  = "project"
 
 # Example: opt out of a built-in tamago skill
 # [[skills]]
-# name    = "cmux-markdown"
+# name    = "hatch"
 # disable = true
 
-# Example: URL-sourced external skill
+# Example: URL-sourced external skill (always project-scoped for now)
 # [[skills]]
 # name   = "my-tool"
 # source = "https://github.com/you/my-tool-skill.git"

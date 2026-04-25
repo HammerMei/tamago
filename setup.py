@@ -424,7 +424,19 @@ def setup_settings(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
+    install_globally: bool = False,
 ):
+    """Symlink settings/config JSON files into .claude and .opencode dirs.
+
+    When install_globally=True, profile-specific settings (e.g. agent-emojis.json) are
+    also installed to ~/.claude/ and ~/.opencode/ in addition to project_root.  This is
+    required when any agent is global-scoped so emoji icons and config apply across all
+    projects, not just the one where tamago install was run.
+
+    Note: settings.json and opencode.json are excluded from the global install because
+    ~/.claude/settings.json is owned by patch_global_settings() and must remain a real
+    file (not a symlink).
+    """
     if profile_root:
         # Profile case: symlink ALL *.json files from the profile's settings dirs
         # so profiles can ship any per-profile config (e.g. agent-emojis.json)
@@ -442,9 +454,25 @@ def setup_settings(
     if operation == Operation.INSTALL:
         symlink_paths(claude_files, project_root / ".claude")
         symlink_paths(opencode_files, project_root / ".opencode")
+        if install_globally:
+            home_claude = Path("~/.claude").expanduser()
+            home_opencode = Path("~/.opencode").expanduser()
+            # Exclude the primary settings files — ~/.claude/settings.json is a real file
+            # managed by patch_global_settings() and must not be replaced with a symlink.
+            global_claude_files = [f for f in claude_files if f.name != "settings.json"]
+            global_opencode_files = [f for f in opencode_files if f.name != "opencode.json"]
+            symlink_paths(global_claude_files, home_claude)
+            symlink_paths(global_opencode_files, home_opencode)
     elif operation == Operation.UNINSTALL:
         unlink_paths(claude_files, project_root / ".claude")
         unlink_paths(opencode_files, project_root / ".opencode")
+        if install_globally:
+            home_claude = Path("~/.claude").expanduser()
+            home_opencode = Path("~/.opencode").expanduser()
+            global_claude_files = [f for f in claude_files if f.name != "settings.json"]
+            global_opencode_files = [f for f in opencode_files if f.name != "opencode.json"]
+            unlink_paths(global_claude_files, home_claude)
+            unlink_paths(global_opencode_files, home_opencode)
 
 
 
@@ -1051,21 +1079,33 @@ def setup_skills(
     project_root: Path,
     profile_root: Path | None = None,
     disabled_skills: "set[str] | None" = None,
+    project_scoped_skills: "set[str] | None" = None,
 ):
-    """Symlink skills into project_root.
+    """Symlink skills into ~/.claude/skills/ (global default) or project_root (project-scoped).
+
+    Built-in tamago and profile skills are global by default — installed to ~/.claude/skills/
+    and ~/.opencode/skills/ so they are accessible from any project when using a global agent.
+    Individual skills can be kept at project level by listing them in [[skills]] with
+    scope="project" in tamago.conf.
 
     Skills come from two sources (profile skills take precedence over tamago skills):
       1. tamago/skills/  — built-in skills bundled with tamago
       2. profile/skills/ — custom skills defined in the profile repo (optional)
 
     When both sources contain a skill with the same name, the profile version wins.
-    disabled_skills: names of skills to skip (and remove existing symlinks for on INSTALL).
+    disabled_skills:       names to skip entirely (remove existing symlinks on INSTALL).
+    project_scoped_skills: built-in/profile skill names with an explicit scope="project" in
+                           tamago.conf — installed at project level instead of globally.
     """
     if disabled_skills is None:
         disabled_skills = set()
+    if project_scoped_skills is None:
+        project_scoped_skills = set()
 
-    target_claude_skills_root = project_root / ".claude" / "skills"
-    target_opencode_skills_root = project_root / ".opencode" / "skills"
+    home_claude_skills = Path("~/.claude/skills").expanduser()
+    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    project_claude_skills = project_root / ".claude" / "skills"
+    project_opencode_skills = project_root / ".opencode" / "skills"
 
     # Collect tamago built-in skills
     tamago_skills_root = source_root / "skills"
@@ -1088,22 +1128,43 @@ def setup_skills(
         d for d in tamago_skill_dirs if d.name not in profile_skill_names
     ] + profile_skill_dirs
 
-    # Filter out disabled skills
+    # Partition: disabled | project-scoped (explicit override) | global (default)
     enabled_skill_dirs = [d for d in merged_skill_dirs if d.name not in disabled_skills]
+    global_skill_dirs = [d for d in enabled_skill_dirs if d.name not in project_scoped_skills]
+    local_skill_dirs = [d for d in enabled_skill_dirs if d.name in project_scoped_skills]
 
     if operation == Operation.INSTALL:
-        # Remove existing symlinks for disabled skills (cleanup when disable=true is added)
-        for skills_root in (target_claude_skills_root, target_opencode_skills_root):
-            for skill_name in disabled_skills:
+        # Remove disabled skills from all possible locations
+        for skill_name in disabled_skills:
+            for skills_root in (home_claude_skills, home_opencode_skills,
+                                project_claude_skills, project_opencode_skills):
                 target = skills_root / skill_name
                 if target.is_symlink():
                     target.unlink()
                     print(f"removed {target} (disabled)")
-        symlink_paths(enabled_skill_dirs, target_claude_skills_root)
-        symlink_paths(enabled_skill_dirs, target_opencode_skills_root)
+
+        # Remove project-level symlinks for skills moving to global scope
+        for d in global_skill_dirs:
+            for skills_root in (project_claude_skills, project_opencode_skills):
+                target = skills_root / d.name
+                if target.is_symlink():
+                    target.unlink()
+                    print(f"removed {target} (moved to global scope)")
+
+        # Global-by-default: install to ~/.claude/skills/ and ~/.opencode/skills/
+        symlink_paths(global_skill_dirs, home_claude_skills)
+        symlink_paths(global_skill_dirs, home_opencode_skills)
+
+        # Project-scoped: explicit scope="project" override in tamago.conf
+        symlink_paths(local_skill_dirs, project_claude_skills)
+        symlink_paths(local_skill_dirs, project_opencode_skills)
+
     elif operation == Operation.UNINSTALL:
-        unlink_paths(enabled_skill_dirs, target_claude_skills_root)
-        unlink_paths(enabled_skill_dirs, target_opencode_skills_root)
+        # Remove from all possible locations (handles scope changes between installs)
+        unlink_paths(enabled_skill_dirs, home_claude_skills)
+        unlink_paths(enabled_skill_dirs, home_opencode_skills)
+        unlink_paths(enabled_skill_dirs, project_claude_skills)
+        unlink_paths(enabled_skill_dirs, project_opencode_skills)
 
 
 # ---------------------------------------------------------------------------
@@ -1424,13 +1485,14 @@ def setup(
     disabled_skills: "set[str] | None" = None,
     disabled_agents: "set[str] | None" = None,
     global_agents: "set[str] | None" = None,
+    project_scoped_skills: "set[str] | None" = None,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root, profile_root, disabled_skills)
+        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, project_scoped_skills)
         setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, global_agents=global_agents)
-        setup_settings(operation, source_root, project_root, profile_root)
+        setup_settings(operation, source_root, project_root, profile_root, install_globally=bool(global_agents))
 
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
         if operation == Operation.INSTALL:
@@ -1645,11 +1707,10 @@ def install_from_conf(
 
     MVP limitations (Slice C/D/E):
     - Only the first [[profiles]] entry is used; a second one raises an error.
-    - Per-agent scope (global vs project) is not yet honoured — all agents install
-      at project scope via the existing setup() orchestrator.
     - tts is derived from the first profile-sourced agent entry; if multiple profile
       agents have conflicting tts values, the first one wins for all of them.
-    - [[skills]] with scope=global are warned and skipped (Slice D limitation).
+    - [[skills]] with scope=global is the default for built-in/profile skills.
+      URL-sourced skills with scope=global are still warned and skipped.
 
     pull_cached_skills: when True, pull already-cached skill repos before installing
       (used by 'tamago update'; False for plain 'tamago install').
@@ -1724,6 +1785,12 @@ def install_from_conf(
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
     global_agents: set[str] = {a.name for a in conf.agents if a.scope == "global" and not a.disable}
+    # Built-in/profile skills with an explicit scope="project" in [[skills]] — kept at project level.
+    # All other built-in/profile skills default to global (~/.claude/skills/).
+    project_scoped_skills: set[str] = {
+        s.name for s in conf.skills
+        if s.source in ("tamago", "profile") and s.scope == "project" and not s.disable
+    }
 
     rc = setup(
         operation,
@@ -1735,6 +1802,7 @@ def install_from_conf(
         disabled_skills=disabled_skills,
         disabled_agents=disabled_agents,
         global_agents=global_agents,
+        project_scoped_skills=project_scoped_skills,
     )
     if rc != 0:
         return rc

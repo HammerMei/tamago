@@ -288,9 +288,8 @@ check_patched "$HOME/.opencode/opencode.json"    "$HOME/.opencode/.tamago-manife
 section "4. Project Symlinks  ($PROJECT_DIR)"
 
 if [ -d "$PROJECT_DIR" ]; then
-  check_symlink "$PROJECT_DIR/.claude/settings.json"         ".claude/settings.json"
-  check_symlink "$PROJECT_DIR/.claude/skills/text-to-speech" ".claude/skills/text-to-speech"
-  check_symlink "$PROJECT_DIR/.opencode/opencode.json"       ".opencode/opencode.json"
+  check_symlink "$PROJECT_DIR/.claude/settings.json"   ".claude/settings.json"
+  check_symlink "$PROJECT_DIR/.opencode/opencode.json" ".opencode/opencode.json"
 
   # machine.env — v2 shell bridge, written by `tamago install`
   if [ -f "$PROJECT_DIR/.tamago/machine.env" ]; then
@@ -306,11 +305,57 @@ if [ -d "$PROJECT_DIR" ]; then
     warn ".tamago/machine.toml" "missing — re-run: tamago install  (pre-Slice-E install)"
   fi
 
-  # Check profile-specific skills (if profile has a skills/ dir)
+  # Read project-scoped skill overrides from tamago.conf
+  # Built-in/profile skills default to global (~/.claude/skills/); scope="project" keeps them local.
+  PROJECT_SCOPED_SKILLS=()
+  if [ -f "$PROJECT_CONF" ]; then
+    _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
+import sys, tomllib
+with open(sys.argv[1], 'rb') as f:
+    conf = tomllib.load(f)
+for s in conf.get('skills', []):
+    if (s.get('source', 'tamago') in ('tamago', 'profile')
+            and s.get('scope', 'global') == 'project'
+            and not s.get('disable', False)):
+        print(s['name'])
+PY
+    ) || _pss=""
+    while IFS= read -r _line; do
+      [ -n "$_line" ] && PROJECT_SCOPED_SKILLS+=("$_line")
+    done <<< "$_pss"
+  fi
+
+  _is_project_scoped() {
+    local _name="$1"
+    for _s in "${PROJECT_SCOPED_SKILLS[@]+"${PROJECT_SCOPED_SKILLS[@]}"}"; do
+      [ "$_s" = "$_name" ] && return 0
+    done
+    return 1
+  }
+
+  # Check tamago built-in skills (global by default)
+  if [ -d "$REPO/skills" ]; then
+    for _skill_dir in "$REPO/skills"/*/; do
+      [ -d "$_skill_dir" ] || continue
+      _skill_name=$(basename "$_skill_dir")
+      if _is_project_scoped "$_skill_name"; then
+        check_symlink "$PROJECT_DIR/.claude/skills/$_skill_name" ".claude/skills/$_skill_name"
+      else
+        check_symlink "$HOME/.claude/skills/$_skill_name" "~/.claude/skills/$_skill_name"
+      fi
+    done
+  fi
+
+  # Check profile-specific skills (global by default)
   if [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; then
-    for skill_dir in "$PROFILE_REPO/skills"/*/; do
-      skill_name=$(basename "$skill_dir")
-      check_symlink "$PROJECT_DIR/.claude/skills/$skill_name" ".claude/skills/$skill_name"
+    for _skill_dir in "$PROFILE_REPO/skills"/*/; do
+      [ -d "$_skill_dir" ] || continue
+      _skill_name=$(basename "$_skill_dir")
+      if _is_project_scoped "$_skill_name"; then
+        check_symlink "$PROJECT_DIR/.claude/skills/$_skill_name" ".claude/skills/$_skill_name"
+      else
+        check_symlink "$HOME/.claude/skills/$_skill_name" "~/.claude/skills/$_skill_name"
+      fi
     done
   fi
 
@@ -323,6 +368,15 @@ if [ -d "$PROJECT_DIR" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
       check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
       check_generated "$HOME/.opencode/agents/$AGENT_NAME.md"  "~/.opencode/agents/$AGENT_NAME.md"
+      # Profile settings (e.g. agent-emojis.json) — also installed globally for global agents
+      if [ -d "$PROFILE_REPO/settings/claude" ]; then
+        for _json_file in "$PROFILE_REPO/settings/claude"/*.json; do
+          [ -e "$_json_file" ] || continue
+          _json_name=$(basename "$_json_file")
+          [ "$_json_name" = "settings.json" ] && continue  # managed by patch_global_settings
+          check_symlink "$HOME/.claude/$_json_name" "~/.claude/$_json_name"
+        done
+      fi
     else
       check_generated "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
       check_symlink   "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
