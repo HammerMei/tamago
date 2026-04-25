@@ -200,6 +200,100 @@ class ResolveProfileRootTests(unittest.TestCase):
                     source, None, "https://github.com/user/my-agent.git", None
                 )
 
+    def _mock_clone_ok(self):
+        """Return a mock subprocess.run that simulates a successful git clone."""
+        result = mock.Mock()
+        result.returncode = 0
+        result.stderr = ""
+        return mock.patch.object(sm.subprocess, "run", return_value=result)
+
+    def test_name_and_repo_both_set_uses_repo_not_name_check(self):
+        """Regression: when both name and repo are set, repo wins and clones
+        instead of failing with 'directory not found' because name dir is absent."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            # hammer.mei-profile does NOT exist — without the fix this raised ValueError
+
+            with self._mock_clone_ok() as mock_run:
+                result = sm.resolve_profile_root(
+                    source,
+                    profile_dir=None,
+                    profile_repo="https://github.com/user/hammer.mei-profile.git",
+                    profile_name="hammer.mei",
+                )
+
+            # Should have called git clone (not raised)
+            mock_run.assert_called_once()
+            clone_args = mock_run.call_args[0][0]
+            self.assertEqual(clone_args[0], "git")
+            self.assertEqual(clone_args[1], "clone")
+            # Local dir uses profile_name ("hammer.mei" → "hammer.mei-profile")
+            self.assertEqual(result, source / "hammer.mei-profile")
+
+    def test_name_and_repo_local_tilde_path(self):
+        """Tilde in local repo path is expanded before git clone."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+
+            with self._mock_clone_ok() as mock_run:
+                with mock.patch.dict(os.environ, {"HOME": td}):
+                    sm.resolve_profile_root(
+                        source,
+                        profile_dir=None,
+                        profile_repo="~/git.repos/hammer.mei-profile.git",
+                        profile_name="hammer.mei",
+                    )
+
+            clone_args = mock_run.call_args[0][0]
+            # ~ must have been expanded — no literal tilde in the clone URL
+            self.assertNotIn("~", clone_args[2])
+            self.assertIn("git.repos/hammer.mei-profile.git", clone_args[2])
+
+    def test_name_and_repo_dir_exists_pulls_instead(self):
+        """When dir already exists, pull instead of clone."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            clone_dir = source / "hammer.mei-profile"
+            clone_dir.mkdir()
+            (clone_dir / ".git").mkdir()
+
+            pull_result = mock.Mock()
+            pull_result.returncode = 0
+            pull_result.stderr = ""
+            with mock.patch.object(sm.subprocess, "run", return_value=pull_result) as mock_run:
+                result = sm.resolve_profile_root(
+                    source,
+                    profile_dir=None,
+                    profile_repo="https://github.com/user/hammer.mei-profile.git",
+                    profile_name="hammer.mei",
+                )
+
+            pull_args = mock_run.call_args[0][0]
+            self.assertIn("pull", pull_args)
+            self.assertEqual(result, clone_dir)
+
+    def test_repo_priority_over_name_when_dir_missing(self):
+        """profile_repo > profile_name: name-only path raises but repo+name clones."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+
+            # name only (no repo) → raises because dir doesn't exist
+            with self.assertRaisesRegex(ValueError, "not found"):
+                sm.resolve_profile_root(source, None, None, "hammer.mei")
+
+            # name + repo → clones successfully (no raise)
+            with self._mock_clone_ok():
+                result = sm.resolve_profile_root(
+                    source, None,
+                    "https://github.com/user/hammer.mei-profile.git",
+                    "hammer.mei",
+                )
+            self.assertIsNotNone(result)
+
     def test_repo_name_from_url_strips_git_suffix(self):
         cases = [
             ("https://github.com/user/hammer.mei-profile.git", "hammer.mei-profile"),
