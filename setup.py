@@ -2180,9 +2180,15 @@ def resolve_profile_root(
 ) -> Path | None:
     """Resolve profile_root from one of the three profile specifier options.
 
-    --profile-dir <path>      — use path directly (must already exist)
-    --profile-repo <url>      — clone (or pull) the repo; enforce *-profile naming
-    --profile-name <name>     — shorthand: <source_root>/<name>-profile
+    Priority order:
+      1. profile_dir  — use path directly (must already exist)
+      2. profile_repo — clone (or pull) the repo; profile_name provides the local
+                        dir name when both are set (e.g. name="hammer.mei" →
+                        clone into <source_root>/hammer.mei-profile/)
+      3. profile_name — shorthand: <source_root>/<name>-profile (must already exist)
+
+    When both name and repo appear in tamago.conf, repo wins so that a fresh
+    machine can auto-clone without the directory having to exist first.
     """
     if profile_dir:
         p = Path(profile_dir).expanduser().resolve()
@@ -2190,20 +2196,17 @@ def resolve_profile_root(
             raise ValueError(f"Profile directory not found: {p}")
         return p
 
-    if profile_name:
-        p = source_root / f"{profile_name}-profile"
-        if not p.is_dir():
-            raise ValueError(
-                f"Profile directory not found: {p}\n"
-                f"  Hint: clone your profile repo there first, or use --profile-repo to clone automatically."
-            )
-        return p
-
     if profile_repo:
         # Expand ~ for local paths (git clone via subprocess does not use a shell,
         # so "~/foo" would be passed literally and fail).
         profile_repo_expanded = os.path.expanduser(profile_repo)
-        repo_name = _repo_name_from_url(profile_repo_expanded)
+        # Use explicit profile_name for the local dir when provided so the user
+        # can control the directory name independently of the URL.
+        if profile_name:
+            name_slug = profile_name if profile_name.endswith("-profile") else f"{profile_name}-profile"
+            repo_name = name_slug
+        else:
+            repo_name = _repo_name_from_url(profile_repo_expanded)
         if not repo_name.endswith("-profile"):
             raise ValueError(
                 f"Profile repo name must end with '-profile', got: '{repo_name}'\n"
@@ -2238,6 +2241,15 @@ def resolve_profile_root(
                     f"git clone failed:\n{result.stderr.strip()}"
                 )
         return clone_dir
+
+    if profile_name:
+        p = source_root / f"{profile_name}-profile"
+        if not p.is_dir():
+            raise ValueError(
+                f"Profile directory not found: {p}\n"
+                f"  Hint: clone your profile repo there first, or use --profile-repo to clone automatically."
+            )
+        return p
 
     return None
 
