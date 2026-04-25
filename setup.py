@@ -65,9 +65,6 @@ DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent
 CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
 GITIGNORE_ENTRIES = (".claude", ".opencode", ".tamago/machine.env", ".tamago/machine.toml")
 
-# Default agent name used when no profile settings.json names one.
-# Single definition so it's easy to spot if tamago ever becomes multi-persona generic.
-DEFAULT_AGENT_NAME = "hammer.mei"
 
 # Cache root for skill repos cloned from git URLs.
 # Uses SHA-256[:16] of the raw URL as the dir name — no URL normalization:
@@ -365,20 +362,6 @@ def load_machine_toml(path: Path) -> "MachineToml | None":
         return None
 
 
-def _detect_agent_name(profile_root: Path | None) -> str:
-    """Read agent name from profile's settings.json, or fall back to DEFAULT_AGENT_NAME."""
-    if profile_root is None:
-        return DEFAULT_AGENT_NAME
-    settings_file = profile_root / "settings" / "claude" / "settings.json"
-    if not settings_file.exists():
-        return DEFAULT_AGENT_NAME
-    try:
-        import json
-        data = json.loads(settings_file.read_text())
-        return data.get("agent", DEFAULT_AGENT_NAME)
-    except (OSError, ValueError):
-        return DEFAULT_AGENT_NAME
-
 
 MACHINE_ENV_NAME = "machine.env"  # lives inside <project_dir>/.tamago/
 
@@ -395,7 +378,7 @@ def _shell_quote_value(v: str) -> str:
 def write_machine_env(
     path: Path,
     profile_repo: Path | None,
-    agent_name: str,
+    agent_name: str | None,
     memory_sync: bool = True,
     tts_enabled: bool = True,
 ) -> None:
@@ -413,7 +396,7 @@ def write_machine_env(
         return
     lines = [
         f"PROFILE_REPO={_shell_quote_value(str(profile_repo.resolve()))}",
-        f"AGENT_NAME={_shell_quote_value(agent_name)}",
+        f"AGENT_NAME={_shell_quote_value(agent_name or '')}",
         f"MEMORY_SYNC={1 if memory_sync else 0}",
         f"TTS_ENABLED={1 if tts_enabled else 0}",
     ]
@@ -639,7 +622,7 @@ def setup_settings(
     project_root: Path,
     profile_root: Path | None = None,
     install_globally: bool = False,
-    agent_name: str = DEFAULT_AGENT_NAME,
+    agent_name: str | None = None,
 ):
     """Merge agent settings into .claude/settings.json and .opencode/opencode.json.
 
@@ -655,8 +638,12 @@ def setup_settings(
     Non-settings JSON files from the profile (e.g. agent-emojis.json) continue to be
     symlinked at the appropriate scope.
     """
-    # --- Build Claude contribution: default-agent settings + profile override ---
-    claude_contribution = _make_default_agent_settings_claude(agent_name)
+    # --- Build Claude contribution: default-agent pointer (if named) + profile override ---
+    if agent_name:
+        claude_contribution = _make_default_agent_settings_claude(agent_name)
+    else:
+        print("warn    no agent name in tamago.conf — skipping default-agent pointer in settings")
+        claude_contribution = {}
     if profile_root:
         profile_claude_path = profile_root / "settings" / "claude" / "settings.json"
         if profile_claude_path.exists():
@@ -666,8 +653,11 @@ def setup_settings(
             except (OSError, ValueError) as e:
                 print(f"warn    could not load profile claude settings: {e}")
 
-    # --- Build OpenCode contribution: default-agent settings + profile override ---
-    opencode_contribution = _make_default_agent_settings_opencode(agent_name)
+    # --- Build OpenCode contribution: default-agent pointer (if named) + profile override ---
+    if agent_name:
+        opencode_contribution = _make_default_agent_settings_opencode(agent_name)
+    else:
+        opencode_contribution = {}
     if profile_root:
         profile_opencode_path = profile_root / "settings" / "opencode" / "opencode.json"
         if profile_opencode_path.exists():
@@ -1812,10 +1802,10 @@ def setup(
     disabled_agents: "set[str] | None" = None,
     global_agents: "set[str] | None" = None,
     project_scoped_skills: "set[str] | None" = None,
+    agent_name: str | None = None,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
-        agent_name = _detect_agent_name(profile_root)
         setup_gitignore(operation, project_root)
         setup_skills(operation, source_root, project_root, profile_root, disabled_skills, project_scoped_skills, has_global_agent=bool(global_agents))
         setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, global_agents=global_agents)
@@ -2116,6 +2106,11 @@ def install_from_conf(
         s.name for s in conf.skills
         if s.source in ("tamago", "profile") and s.scope == "project" and not s.disable
     }
+    # Agent name for default-agent pointer: first non-disabled agent in conf.
+    agent_name: str | None = next(
+        (a.name for a in conf.agents if not a.disable),
+        None,
+    )
 
     rc = setup(
         operation,
@@ -2128,6 +2123,7 @@ def install_from_conf(
         disabled_agents=disabled_agents,
         global_agents=global_agents,
         project_scoped_skills=project_scoped_skills,
+        agent_name=agent_name,
     )
     if rc != 0:
         return rc

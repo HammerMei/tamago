@@ -1842,6 +1842,67 @@ name = "edm_mei"
 
             mock_pull.assert_called_once_with(source, "tamago")
 
+    def test_agent_name_from_conf_agents_passed_to_setup(self):
+        """install_from_conf reads agent name from [[agents]] name= and passes it to setup()."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text('[[agents]]\nname = "my.agent"\n')
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                result = sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "my.agent")
+
+    def test_disabled_agent_skipped_for_agent_name(self):
+        """A disabled [[agents]] entry must not be selected as the agent_name."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text(
+                '[[agents]]\nname = "disabled.agent"\ndisable = true\n\n'
+                '[[agents]]\nname = "active.agent"\n'
+            )
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "active.agent")
+
+    def test_no_agents_passes_none_agent_name(self):
+        """When tamago.conf has no [[agents]], agent_name=None is passed to setup()."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertIsNone(mock_setup.call_args.kwargs["agent_name"])
+
 
 class SkillRepoCacheTests(unittest.TestCase):
     """Tests for _skill_repo_cache_dir and _clone_or_reuse_skill_repo."""
@@ -5625,6 +5686,54 @@ class SetupSettingsScopeTests(unittest.TestCase):
             self.assertNotIn("agent", global_data, "stale global contribution not cleaned up")
             project_data = json.loads((project / ".claude" / "settings.json").read_text())
             self.assertEqual(project_data["agent"], "hammer.mei")
+
+    def test_no_agent_name_warns_and_skips_agent_pointer(self):
+        """When agent_name is None, a warning is printed and no 'agent' key is written."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            project = td / "project"
+            project.mkdir()
+            source = td / "source"
+            (source / "settings" / "claude").mkdir(parents=True)
+
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                sm.setup_settings(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    agent_name=None,
+                )
+
+            self.assertIn("no agent name in tamago.conf", stdout.getvalue())
+            settings = project / ".claude" / "settings.json"
+            if settings.exists():
+                data = json.loads(settings.read_text())
+                self.assertNotIn("agent", data, "agent pointer should not be written when agent_name is None")
+
+    def test_no_agent_name_with_profile_settings_still_merges_profile(self):
+        """With agent_name=None, profile settings are still merged (just without the agent pointer)."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            project = td / "project"
+            project.mkdir()
+            source = td / "source"
+            (source / "settings" / "claude").mkdir(parents=True)
+            profile = self._make_profile(td, claude_settings={"pluginX": True})
+
+            with mock.patch("sys.stdout", io.StringIO()):
+                sm.setup_settings(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    agent_name=None,
+                )
+
+            settings = project / ".claude" / "settings.json"
+            data = json.loads(settings.read_text())
+            self.assertNotIn("agent", data)
+            self.assertTrue(data.get("pluginX"), "profile settings should still be merged")
 
 
 if __name__ == "__main__":
