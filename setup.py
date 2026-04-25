@@ -29,7 +29,20 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]  # pip install tomli
+    except ModuleNotFoundError:
+        print(
+            "error: tomllib not found.\n"
+            "  Python 3.11+ includes it built-in.\n"
+            "  On Python 3.10 or earlier: pip install tomli\n"
+            "  Or upgrade Python: brew install python@3.11",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
