@@ -2200,7 +2200,10 @@ def resolve_profile_root(
         return p
 
     if profile_repo:
-        repo_name = _repo_name_from_url(profile_repo)
+        # Expand ~ for local paths (git clone via subprocess does not use a shell,
+        # so "~/foo" would be passed literally and fail).
+        profile_repo_expanded = os.path.expanduser(profile_repo)
+        repo_name = _repo_name_from_url(profile_repo_expanded)
         if not repo_name.endswith("-profile"):
             raise ValueError(
                 f"Profile repo name must end with '-profile', got: '{repo_name}'\n"
@@ -2224,10 +2227,10 @@ def resolve_profile_root(
                 f"  Remove it first or use --profile-dir to point elsewhere."
             )
         else:
-            print(f"cloning {profile_repo}")
+            print(f"cloning {profile_repo_expanded}")
             print(f"     → {clone_dir}")
             result = subprocess.run(
-                ["git", "clone", profile_repo, str(clone_dir)],
+                ["git", "clone", profile_repo_expanded, str(clone_dir)],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
