@@ -1901,10 +1901,17 @@ def setup(
         setup_settings(operation, source_root, project_root, profile_root, install_globally=bool(global_agents), agent_name=agent_name)
 
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
+        global_machine_env = Path.home() / ".tamago" / MACHINE_ENV_NAME
         if operation == Operation.INSTALL:
             write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
+            if global_agents:
+                # Global agent: also write ~/.tamago/machine.env so memory-sync.sh
+                # finds the profile when Claude runs outside this project directory.
+                write_machine_env(global_machine_env, profile_root, agent_name, memory_sync, tts_enabled)
         elif operation == Operation.UNINSTALL:
             write_machine_env(machine_env, None, "")
+            if global_agents:
+                write_machine_env(global_machine_env, None, "")
 
         return 0
     except Exception as e:

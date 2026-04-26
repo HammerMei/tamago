@@ -896,6 +896,114 @@ class MachineEnvTests(unittest.TestCase):
             self.assertRegex(content, r"AGENT_NAME='[^']*'")
 
 
+class GlobalMachineEnvTests(unittest.TestCase):
+    """Tests for ~/.tamago/machine.env written by setup() when global_agents is set."""
+
+    def _make_minimal_source(self, root: Path) -> tuple[Path, Path]:
+        source = root / "tamago"
+        project = root / "project"
+        project.mkdir(parents=True)
+        for subdir in ["skills", "agents", "settings/claude", "settings/opencode",
+                       "settings/opencode/plugins"]:
+            (source / subdir).mkdir(parents=True)
+        (source / "settings" / "claude" / "settings.json").write_text("{}")
+        (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+        return source, project
+
+    def _fake_home(self, root: Path):
+        """Return a Path.home classmethod replacement that redirects ~ to root/home."""
+        fake = root / "home"
+        fake.mkdir(parents=True, exist_ok=True)
+        return classmethod(lambda cls: fake)
+
+    def test_global_agent_writes_home_machine_env_on_install(self):
+        """setup() writes ~/.tamago/machine.env when global_agents is non-empty."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, project = self._make_minimal_source(root)
+            profile = root / "hammer.mei-profile"
+            profile.mkdir()
+            fake_home = root / "home"
+
+            with mock.patch.object(sm.Path, "home", self._fake_home(root)):
+                sm.setup(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    agent_name="hammer.mei",
+                    global_agents={"hammer.mei"},
+                )
+
+            global_env = fake_home / ".tamago" / "machine.env"
+            self.assertTrue(global_env.exists(), "~/.tamago/machine.env not written")
+            content = global_env.read_text()
+            self.assertIn("PROFILE_REPO=", content)
+            self.assertIn("hammer.mei", content)
+
+    def test_no_global_agent_does_not_write_home_machine_env(self):
+        """setup() must NOT write ~/.tamago/machine.env when global_agents is empty."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, project = self._make_minimal_source(root)
+            fake_home = root / "home"
+
+            with mock.patch.object(sm.Path, "home", self._fake_home(root)):
+                sm.setup(sm.Operation.INSTALL, source, project)
+
+            global_env = fake_home / ".tamago" / "machine.env"
+            self.assertFalse(global_env.exists(),
+                             "~/.tamago/machine.env written unexpectedly without global_agents")
+
+    def test_global_agent_removes_home_machine_env_on_uninstall(self):
+        """setup(UNINSTALL) removes ~/.tamago/machine.env when global_agents is non-empty."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, project = self._make_minimal_source(root)
+            fake_home = root / "home"
+
+            # Pre-create the file as if a prior install wrote it.
+            global_env = fake_home / ".tamago" / "machine.env"
+            global_env.parent.mkdir(parents=True, exist_ok=True)
+            global_env.write_text("PROFILE_REPO='/some/profile'\nAGENT_NAME='hammer.mei'\n")
+
+            with mock.patch.object(sm.Path, "home", self._fake_home(root)):
+                sm.setup(
+                    sm.Operation.UNINSTALL,
+                    source,
+                    project,
+                    global_agents={"hammer.mei"},
+                )
+
+            self.assertFalse(global_env.exists(),
+                             "~/.tamago/machine.env not removed on uninstall")
+
+    def test_global_machine_env_matches_project_machine_env(self):
+        """~/.tamago/machine.env and project machine.env have identical content."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, project = self._make_minimal_source(root)
+            profile = root / "hammer.mei-profile"
+            profile.mkdir()
+            fake_home = root / "home"
+
+            with mock.patch.object(sm.Path, "home", self._fake_home(root)):
+                sm.setup(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    agent_name="hammer.mei",
+                    global_agents={"hammer.mei"},
+                )
+
+            project_env = project / ".tamago" / "machine.env"
+            global_env = fake_home / ".tamago" / "machine.env"
+            self.assertTrue(project_env.exists())
+            self.assertTrue(global_env.exists())
+            self.assertEqual(project_env.read_text(), global_env.read_text())
+
+
 class PatchSettingsTests(unittest.TestCase):
     """Tests for patch_settings and unpatch_settings."""
 
