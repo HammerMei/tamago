@@ -120,6 +120,65 @@ def unlink_paths(source_paths: list[Path], target_root: Path):
 
 
 # ---------------------------------------------------------------------------
+# Agent memory directory naming
+# ---------------------------------------------------------------------------
+
+def _agent_memory_link_names(agent_name: str) -> list[str]:
+    """Return all symlink names to create for an agent's memory directory.
+
+    Claude Code 2.1.121 changed the agent-memory directory naming convention:
+    dots in agent names are replaced with hyphens when constructing the path
+    (e.g. ``hammer.mei`` → ``hammer-mei``).  We create both forms pointing at
+    the same source so installations work across Claude Code versions until
+    Anthropic resolves this.
+
+    Tracking issue: https://github.com/anthropics/claude-code/issues/54208
+    """
+    normalized = agent_name.replace(".", "-")
+    names: list[str] = [agent_name]
+    if normalized != agent_name:
+        names.append(normalized)
+    return names
+
+
+def _symlink_mem_dir(source: Path, target_root: Path) -> None:
+    """Create both the canonical and normalized memory-dir symlinks for *source*.
+
+    If Claude Code has already auto-created an *empty* real directory at the
+    normalized path (e.g. ``hammer-mei/``), it is removed and replaced with a
+    symlink.  A non-empty directory is left untouched with a warning.
+    """
+    target_root.mkdir(parents=True, exist_ok=True)
+    for link_name in _agent_memory_link_names(source.name):
+        target = target_root / link_name
+        if target.is_symlink():
+            if target.resolve() == source.resolve():
+                print(f"exists  {target} -> {source}")
+                continue
+            target.unlink()
+        elif target.is_dir():
+            if any(target.iterdir()):
+                print(f"warning {target} is a non-empty directory — skipping symlink")
+                continue
+            # Empty dir auto-created by Claude Code (see issue #54208); replace.
+            target.rmdir()
+        elif target.exists():
+            print(f"warning {target} exists and is not a symlink — skipping")
+            continue
+        target.symlink_to(source)
+        print(f"linked  {target} -> {source}")
+
+
+def _unlink_mem_dir(source: Path, target_root: Path) -> None:
+    """Remove all memory-dir symlinks (both canonical and normalized forms)."""
+    for link_name in _agent_memory_link_names(source.name):
+        target = target_root / link_name
+        if target.is_symlink():
+            target.unlink()
+            print(f"removed {target}")
+
+
+# ---------------------------------------------------------------------------
 # .gitignore management
 # ---------------------------------------------------------------------------
 
@@ -1114,9 +1173,12 @@ def _merge_agent(
     profile_path = str(profile_root.resolve())
     memory_path = f"{profile_path}/agents/memory/{agent_name}"
 
+    agent_memory_dir = agent_name.replace(".", "-")  # normalized per CC convention
+
     def _sub(text: str) -> str:
         return (
             text.replace("{{AGENT_NAME}}", agent_name)
+                .replace("{{AGENT_MEMORY_DIR}}", agent_memory_dir)
                 .replace("{{PROFILE_REPO}}", profile_path)
                 .replace("{{AGENT_MEMORY_PATH}}", memory_path)
         )
@@ -1301,18 +1363,18 @@ def setup_agents(
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
             enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
 
-            # Remove project-level memory symlink for agents that moved to global scope
+            # Remove project-level memory symlinks for agents that moved to global scope
+            # (both canonical and normalized forms — see _agent_memory_link_names)
             for d in enabled_mem_dirs:
                 if d.name in global_agents:
-                    old_project_mem = target_claude_agent_mem_root / d.name
-                    if old_project_mem.is_symlink():
-                        old_project_mem.unlink()
-                        print(f"removed {old_project_mem} (moved to global scope)")
+                    _unlink_mem_dir(d, target_claude_agent_mem_root)
 
             global_mem_dirs = [d for d in enabled_mem_dirs if d.name in global_agents]
             project_mem_dirs = [d for d in enabled_mem_dirs if d.name not in global_agents]
-            symlink_paths(global_mem_dirs, home_agent_mem_root)
-            symlink_paths(project_mem_dirs, target_claude_agent_mem_root)
+            for d in global_mem_dirs:
+                _symlink_mem_dir(d, home_agent_mem_root)
+            for d in project_mem_dirs:
+                _symlink_mem_dir(d, target_claude_agent_mem_root)
 
     elif operation == Operation.UNINSTALL:
         # Determine which dirs to clean up for a given agent, based on current conf scope.
@@ -1357,7 +1419,8 @@ def setup_agents(
                 for d in _uninstall_dirs(name):
                     _remove_agent_files_if_managed(name, [d])
 
-        # Remove memory symlinks — scope-aware (mirrors INSTALL routing)
+        # Remove memory symlinks — scope-aware (mirrors INSTALL routing).
+        # Both canonical (hammer.mei) and normalized (hammer-mei) forms are removed.
         mem_source = (
             (profile_root / "agents" / "memory") if profile_root
             else (source_root / "agents" / "memory")
@@ -1368,10 +1431,7 @@ def setup_agents(
             enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
             for d in enabled_mem_dirs:
                 mem_root = home_agent_mem_root if d.name in global_agents else target_claude_agent_mem_root
-                target = mem_root / d.name
-                if target.is_symlink():
-                    target.unlink()
-                    print(f"removed {target}")
+                _unlink_mem_dir(d, mem_root)
 
 
 # ---------------------------------------------------------------------------

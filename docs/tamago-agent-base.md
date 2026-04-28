@@ -22,19 +22,25 @@ Specify `--project <dir>` to check a different project directory.
 
 Memory is stored in two layers accessible via project-scope symlinks under `.claude/agent-memory/`.
 
-> ⚠️ **Always use the symlink path** `.claude/agent-memory/{{AGENT_NAME}}/` for all Read/Write
+> ⚠️ **Always use the symlink path** `.claude/agent-memory/{{AGENT_MEMORY_DIR}}/` for all Read/Write
 > tool calls — it lives inside the project directory and never requires permission approval.
 > Never write to `~/.claude/` or any absolute profile path — those are outside the project
 > scope and will trigger approval prompts.
+>
+> **Path equivalence**: `.claude/agent-memory/{{AGENT_MEMORY_DIR}}/` and
+> `.claude/agent-memory/{{AGENT_NAME}}/` are **the same location** — tamago creates both
+> as symlinks to the same source. Claude Code may inject either form in the
+> "Persistent Agent Memory" section depending on version; both work.
+> (Tracking: https://github.com/anthropics/claude-code/issues/54208)
 
 ### 🌐 Shared Memory (synced across all instances)
-Path: `.claude/agent-memory/{{AGENT_NAME}}/`
+Path: `.claude/agent-memory/{{AGENT_MEMORY_DIR}}/`
 - `MEMORY.md` — memory index; auto-loaded at session start when available. **If not present in context, load it explicitly with the Read tool before proceeding.**
 - Topic files (e.g. `user.md`, `feedback.md`) — load on demand when relevant
 - All content synced via git to every instance of this agent
 
 ### 🖥️ Environment-Specific Memory (local to this machine)
-Path: `.claude/agent-memory/{{AGENT_NAME}}/env-{hostname}/`
+Path: `.claude/agent-memory/{{AGENT_MEMORY_DIR}}/env-{hostname}/`
 - Per-machine private memory (hardware, installed tools, local config)
 - Also git-synced, but only read by the matching hostname instance
 - Use `hostname` command to get the current machine name

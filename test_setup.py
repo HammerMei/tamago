@@ -4565,14 +4565,12 @@ class DisableAgentTests(unittest.TestCase):
                 disabled_agents={"hammer.mei"},
             )
 
-            # hammer.mei memory should NOT be symlinked
-            self.assertFalse(
-                (project / ".claude" / "agent-memory" / "hammer.mei").exists()
-            )
+            mem_root = project / ".claude" / "agent-memory"
+            # hammer.mei memory should NOT be symlinked (neither form)
+            self.assertFalse((mem_root / "hammer.mei").exists())
+            self.assertFalse((mem_root / "hammer-mei").exists())
             # other-agent memory SHOULD be symlinked
-            self.assertTrue(
-                (project / ".claude" / "agent-memory" / "other-agent").is_symlink()
-            )
+            self.assertTrue((mem_root / "other-agent").is_symlink())
 
     def test_install_from_conf_builds_disabled_sets(self):
         """install_from_conf extracts disabled names and passes them to setup()."""
@@ -5149,8 +5147,15 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     global_agents=set(),
                 )
 
-            mem_link = project / ".claude" / "agent-memory" / "hammer.mei"
-            self.assertTrue(mem_link.is_symlink())
+            mem_root = project / ".claude" / "agent-memory"
+            # Both canonical (dot) and normalized (hyphen) forms must be symlinked
+            self.assertTrue((mem_root / "hammer.mei").is_symlink())
+            self.assertTrue((mem_root / "hammer-mei").is_symlink())
+            # Both must resolve to the same source
+            self.assertEqual(
+                (mem_root / "hammer.mei").resolve(),
+                (mem_root / "hammer-mei").resolve(),
+            )
             home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
             self.assertFalse(home_mem.exists())
 
@@ -5169,13 +5174,14 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     global_agents={"hammer.mei"},
                 )
 
-            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
-            self.assertTrue(home_mem.is_symlink())
+            home_root = root / "home" / ".claude" / "agent-memory"
+            self.assertTrue((home_root / "hammer.mei").is_symlink())
+            self.assertTrue((home_root / "hammer-mei").is_symlink())
             project_mem = project / ".claude" / "agent-memory" / "hammer.mei"
             self.assertFalse(project_mem.exists())
 
     def test_global_agent_memory_cleans_up_old_project_symlink(self):
-        """When agent moves to global, stale project-level memory symlink is removed."""
+        """When agent moves to global, stale project-level memory symlinks are removed."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_minimal_source(root)
@@ -5190,8 +5196,9 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     profile_root=profile,
                     global_agents=set(),
                 )
-                project_mem = project / ".claude" / "agent-memory" / "hammer.mei"
-                self.assertTrue(project_mem.is_symlink())
+                proj_mem_root = project / ".claude" / "agent-memory"
+                self.assertTrue((proj_mem_root / "hammer.mei").is_symlink())
+                self.assertTrue((proj_mem_root / "hammer-mei").is_symlink())
 
                 # Re-install as global-scoped
                 sm.setup_agents(
@@ -5201,10 +5208,12 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     global_agents={"hammer.mei"},
                 )
 
-            # Old project symlink cleaned up
-            self.assertFalse(project_mem.exists())
-            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
-            self.assertTrue(home_mem.is_symlink())
+            # Both project symlinks cleaned up
+            self.assertFalse((proj_mem_root / "hammer.mei").exists())
+            self.assertFalse((proj_mem_root / "hammer-mei").exists())
+            home_root = root / "home" / ".claude" / "agent-memory"
+            self.assertTrue((home_root / "hammer.mei").is_symlink())
+            self.assertTrue((home_root / "hammer-mei").is_symlink())
 
     def test_uninstall_removes_project_agent_and_memory(self):
         with tempfile.TemporaryDirectory() as td:
@@ -5218,15 +5227,18 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile, global_agents=set(),
                 )
-                mem_link = project / ".claude" / "agent-memory" / "hammer.mei"
-                self.assertTrue(mem_link.is_symlink())
+                mem_root = project / ".claude" / "agent-memory"
+                self.assertTrue((mem_root / "hammer.mei").is_symlink())
+                self.assertTrue((mem_root / "hammer-mei").is_symlink())
 
                 sm.setup_agents(
                     sm.Operation.UNINSTALL, source, project,
                     profile_root=profile, global_agents=set(),
                 )
 
-            self.assertFalse(mem_link.exists())
+            # Both symlink forms must be removed
+            self.assertFalse((mem_root / "hammer.mei").exists())
+            self.assertFalse((mem_root / "hammer-mei").exists())
             agent_md = project / ".claude" / "agents" / "hammer.mei.md"
             self.assertFalse(agent_md.exists())
 
@@ -5242,15 +5254,43 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile, global_agents={"hammer.mei"},
                 )
-                home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
-                self.assertTrue(home_mem.is_symlink())
+                home_root = root / "home" / ".claude" / "agent-memory"
+                self.assertTrue((home_root / "hammer.mei").is_symlink())
+                self.assertTrue((home_root / "hammer-mei").is_symlink())
 
                 sm.setup_agents(
                     sm.Operation.UNINSTALL, source, project,
                     profile_root=profile, global_agents={"hammer.mei"},
                 )
 
-            self.assertFalse(home_mem.exists())
+            self.assertFalse((home_root / "hammer.mei").exists())
+            self.assertFalse((home_root / "hammer-mei").exists())
+
+
+    def test_memory_symlink_replaces_empty_dir_created_by_claude_code(self):
+        """An empty directory at the normalized path (auto-created by Claude Code 2.1.121)
+        must be replaced with a symlink. See: github.com/anthropics/claude-code/issues/54208
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            project = root / "project"
+
+            # Pre-create the empty directory that Claude Code 2.1.121 auto-creates
+            empty_dir = project / ".claude" / "agent-memory" / "hammer-mei"
+            empty_dir.mkdir(parents=True)
+            self.assertTrue(empty_dir.is_dir())
+            self.assertFalse(empty_dir.is_symlink())
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile, global_agents=set(),
+                )
+
+            # Empty dir must be replaced with symlink
+            self.assertTrue(empty_dir.is_symlink())
 
 
 # ---------------------------------------------------------------------------
