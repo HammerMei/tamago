@@ -29,7 +29,7 @@ Memory is stored in two layers accessible via project-scope symlinks under `.cla
 
 ### 🌐 Shared Memory (synced across all instances)
 Path: `.claude/agent-memory/{{AGENT_NAME}}/`
-- `MEMORY.md` — memory index; auto-loaded at session start when available. **If not present in context, load it explicitly with the Read tool before proceeding.**
+- `MEMORY.md` — memory index; injected into session context by the SessionStart hook. **If not present in context, load it explicitly with the Read tool before proceeding.**
 - Topic files (e.g. `user.md`, `feedback.md`) — load on demand when relevant
 - All content synced via git to every instance of this agent
 

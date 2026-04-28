@@ -116,6 +116,16 @@ print(json.load(open(sys.argv[1])).get('defaultModel', 'unknown'))
         git commit -m "auto: session init footprint" --quiet && \
         (git pull --rebase --quiet && git push --quiet) 2>/dev/null || true
     fi
+
+    # 6. Inject MEMORY.md into session context via stdout.
+    # SessionStart hook stdout is injected by Claude Code as system context, so
+    # printing here ensures memory is always available regardless of whether
+    # Claude Code auto-loads agent-memory files.
+    MEMORY_FILE="$MEMORY_REPO/$MEMORY_PATH/$AGENT_NAME/MEMORY.md"
+    if [ -f "$MEMORY_FILE" ]; then
+      echo "## Agent Memory (MEMORY.md)"
+      cat "$MEMORY_FILE"
+    fi
     ;;
 
   --pull)
