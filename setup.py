@@ -1697,35 +1697,37 @@ def setup_external_skills(
     project_root: Path,
     cache_root: Path = DEFAULT_CACHE_ROOT,
 ) -> int:
-    """Symlink (or remove) external (URL-sourced) skills in project_root.
+    """Symlink (or remove) external (URL-sourced) skills.
 
     Processes only SkillEntry objects where source is a git URL (not
-    "tamago" or "profile").  Skills with scope="global" are warned and
-    skipped (global scope is not yet supported in this version).
+    "tamago" or "profile").  Supports both project and global scope.
     Returns 0 on success, 1 if any skill fails to clone, resolve, or link.
     """
     errors = 0
+
+    home_claude_skills   = Path("~/.claude/skills").expanduser()
+    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    project_claude_skills   = project_root / ".claude"   / "skills"
+    project_opencode_skills = project_root / ".opencode" / "skills"
+    local_bin = Path("~/.local/bin").expanduser()
+
     for skill in conf_skills:
         url = skill.source
         if url in ("tamago", "profile"):
             continue
-        if skill.scope == "global":
-            print(
-                f"warning skill '{skill.name}' scope=global is not yet supported "
-                f"in this version — skipping (use scope=\"project\" instead)",
-                file=sys.stderr,
-            )
-            continue
 
-        skills_roots = (
-            project_root / ".claude" / "skills",
-            project_root / ".opencode" / "skills",
-        )
+        # Route by scope — mirrors the logic in setup_skills
+        if skill.scope == "global":
+            skills_roots = (home_claude_skills, home_opencode_skills)
+            stale_roots  = (project_claude_skills, project_opencode_skills)
+        else:  # project scope (default)
+            skills_roots = (project_claude_skills, project_opencode_skills)
+            stale_roots  = (home_claude_skills, home_opencode_skills)
 
         if operation == Operation.INSTALL:
             if skill.disable:
-                # Remove any pre-existing symlink for this skill; leave cache dir intact
-                for skills_root in skills_roots:
+                # Remove from all possible locations; leave cache dir intact
+                for skills_root in (*skills_roots, *stale_roots):
                     target = skills_root / skill.name
                     if target.is_symlink():
                         target.unlink()
@@ -1733,6 +1735,15 @@ def setup_external_skills(
                 continue
             try:
                 skill_dir = _resolve_external_skill_dir(skill, cache_root)
+
+                # Clean up stale symlinks left from a previous scope (handles scope changes)
+                for stale_root in stale_roots:
+                    stale = stale_root / skill.name
+                    if stale.is_symlink():
+                        stale.unlink()
+                        print(f"removed {stale} (scope changed)")
+
+                # Install into target scope locations
                 for skills_root in skills_roots:
                     target = skills_root / skill.name
                     skills_root.mkdir(parents=True, exist_ok=True)
@@ -1747,16 +1758,43 @@ def setup_external_skills(
                         )
                     target.symlink_to(skill_dir)
                     print(f"linked  {target} -> {skill_dir}")
+
+                # Install CLI entry points from skill's bin/ dir to ~/.local/bin
+                skill_bin = skill_dir / "bin"
+                if skill_bin.is_dir():
+                    bin_files = [
+                        f for f in sorted(skill_bin.iterdir())
+                        if not f.name.startswith(".") and not f.is_dir()
+                    ]
+                    if bin_files:
+                        symlink_paths(bin_files, local_bin)
+
             except Exception as e:
                 print(f"error   {e}", file=sys.stderr)
                 errors += 1
 
         elif operation == Operation.UNINSTALL:
-            for skills_root in skills_roots:
+            # Remove from all possible locations (handles scope changes between installs)
+            for skills_root in (home_claude_skills, home_opencode_skills,
+                                project_claude_skills, project_opencode_skills):
                 target = skills_root / skill.name
                 if target.is_symlink():
                     target.unlink()
                     print(f"removed {target}")
+
+            # Remove bin/ entry points from ~/.local/bin (best-effort: cache may be gone)
+            try:
+                skill_dir = _resolve_external_skill_dir(skill, cache_root)
+                skill_bin = skill_dir / "bin"
+                if skill_bin.is_dir():
+                    for f in sorted(skill_bin.iterdir()):
+                        if not f.name.startswith(".") and not f.is_dir():
+                            local_target = local_bin / f.name
+                            if local_target.is_symlink() and local_target.resolve() == f.resolve():
+                                local_target.unlink()
+                                print(f"removed {local_target}")
+            except Exception:
+                pass  # Cache may be absent; skip bin cleanup
 
     return 1 if errors else 0
 
@@ -2121,7 +2159,7 @@ def install_from_conf(
     - tts is derived from the first profile-sourced agent entry; if multiple profile
       agents have conflicting tts values, the first one wins for all of them.
     - [[skills]] with scope=global is the default for built-in/profile skills.
-      URL-sourced skills with scope=global are still warned and skipped.
+      URL-sourced skills support both scope=global and scope=project.
 
     pull_cached_skills: when True, pull already-cached skill repos before installing
       (used by 'tamago update'; False for plain 'tamago install').
@@ -2328,11 +2366,19 @@ def resolve_profile_root(
         return clone_dir
 
     if profile_name:
+        # Check CONVENTIONAL_ROOT (~/.tamago/) first so that profile repos cloned
+        # there are found regardless of where the tamago source lives.
+        conventional = CONVENTIONAL_ROOT / f"{profile_name}-profile"
+        if conventional.is_dir():
+            return conventional
+        # Fall back to a profile living inside the tamago source tree itself.
         p = source_root / f"{profile_name}-profile"
         if not p.is_dir():
             raise ValueError(
                 f"Profile directory not found: {p}\n"
-                f"  Hint: clone your profile repo there first, or use --profile-repo to clone automatically."
+                f"  Also checked: {conventional}\n"
+                f"  Hint: clone your profile repo to ~/.tamago/{profile_name}-profile,\n"
+                f"  or use --profile-repo to clone automatically."
             )
         return p
 

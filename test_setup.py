@@ -172,14 +172,34 @@ class ResolveProfileRootTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not found"):
                 sm.resolve_profile_root(source, "/does/not/exist", None, None)
 
+    def test_profile_name_resolves_to_conventional_root_first(self):
+        """profile_name → checks CONVENTIONAL_ROOT (~/.tamago/) before source_root."""
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "tamago"
+            source.mkdir()
+            # Profile exists in BOTH conventional root and source_root —
+            # conventional should win.
+            conventional = Path(td) / "fake-tamago"
+            profile_conventional = conventional / "hammer.mei-profile"
+            profile_conventional.mkdir(parents=True)
+            profile_source = source / "hammer.mei-profile"
+            profile_source.mkdir()
+
+            with mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional):
+                result = sm.resolve_profile_root(source, None, None, "hammer.mei")
+            self.assertEqual(result, profile_conventional)
+
     def test_profile_name_resolves_to_sibling(self):
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "tamago"
             source.mkdir()
             profile = source / "hammer.mei-profile"
             profile.mkdir()
+            # Conventional root has no profile — falls through to source_root sibling.
+            conventional = Path(td) / "fake-tamago"
 
-            result = sm.resolve_profile_root(source, None, None, "hammer.mei")
+            with mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional):
+                result = sm.resolve_profile_root(source, None, None, "hammer.mei")
             self.assertEqual(result, profile)
 
     def test_profile_name_missing_raises(self):
@@ -280,10 +300,12 @@ class ResolveProfileRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "tamago"
             source.mkdir()
+            conventional = Path(td) / "fake-tamago"  # no profiles here
 
-            # name only (no repo) → raises because dir doesn't exist
-            with self.assertRaisesRegex(ValueError, "not found"):
-                sm.resolve_profile_root(source, None, None, "hammer.mei")
+            # name only (no repo) → raises because dir doesn't exist anywhere
+            with mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional):
+                with self.assertRaisesRegex(ValueError, "not found"):
+                    sm.resolve_profile_root(source, None, None, "hammer.mei")
 
             # name + repo → clones successfully (no raise)
             with self._mock_clone_ok():
@@ -1981,6 +2003,7 @@ tts = false
             source.mkdir()
             profile = source / "hammer.mei-profile"
             profile.mkdir()
+            conventional = Path(td) / "fake-tamago"  # no profiles here
 
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
@@ -1988,6 +2011,7 @@ tts = false
             with (
                 mock.patch.object(sm, "setup", return_value=0) as mock_setup,
                 mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional),
             ):
                 result = sm.install_from_conf(
                     conf_path,
@@ -2257,26 +2281,33 @@ class SetupExternalSkillsTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             mock_clone.assert_not_called()
 
-    def test_global_scope_warns_and_skips(self):
-        """scope='global' emits warning and skips — returns 0 (not an error)."""
+    def test_global_scope_installs_to_home_claude(self):
+        """scope='global' installs into ~/.claude/skills/ and ~/.opencode/skills/."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
+            skill_dir = Path(td) / "cloned-skill-dir"
+            skill_dir.mkdir()
             skill = self._make_skill(
                 "my-skill", "https://example.com/skill.git", scope="global"
             )
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(sm.sys, "stderr", stderr),
-                mock.patch.object(
-                    sm, "_clone_or_reuse_skill_repo"
-                ) as mock_clone,
+            with mock.patch.object(
+                sm, "_resolve_external_skill_dir", return_value=skill_dir
             ):
                 rc = sm.setup_external_skills(
                     sm.Operation.INSTALL, [skill], project
                 )
             self.assertEqual(rc, 0)
-            self.assertIn("global", stderr.getvalue())
-            mock_clone.assert_not_called()
+            # Must be installed globally, not in the project dir
+            global_claude   = Path("~/.claude/skills/my-skill").expanduser()
+            global_opencode = Path("~/.opencode/skills/my-skill").expanduser()
+            self.assertTrue(global_claude.is_symlink())
+            self.assertTrue(global_opencode.is_symlink())
+            self.assertEqual(global_claude.resolve(), skill_dir.resolve())
+            # Must NOT be installed at project scope
+            self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
+            # Cleanup
+            global_claude.unlink()
+            global_opencode.unlink()
 
     def test_url_skill_linked_with_skill_name(self):
         """URL skill is cloned and symlinked under skill.name (not the hash dir name)."""
