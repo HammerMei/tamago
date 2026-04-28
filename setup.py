@@ -5,8 +5,6 @@ Commands
 --------
 install-global [--source <tamago>]
     Patch global Claude/OpenCode settings in ~/.claude and ~/.opencode.
-    Also injects ASSISTANT_SETUP_REPO into ~/.zshrc when source != default.
-
 install [--source <tamago>] [--config <path>]
     Install agents/skills into the current project from .tamago/tamago.conf.
     Auto-detects .tamago/tamago.conf in the current directory — create one
@@ -55,13 +53,11 @@ class Operation(str, Enum):
     UNINSTALL = "uninstall"
 
 
-# The directory containing this script is always the tamago repo root —
-# use it as the default so setup.py works regardless of where tamago is installed.
-DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent
-
-# Conventional install location — shell scripts fall back to this path when
-# ASSISTANT_SETUP_REPO is not set.  We skip env injection only when tamago
-# is actually installed here (the fallback already covers it).
+# Conventional install location: tamago lives at ~/.tamago by default.
+# Shell scripts and hooks always reference this path.
+# To point tamago at a different directory (e.g. a development checkout),
+# set ASSISTANT_SETUP_REPO=/path/to/tamago in your shell profile — tamago
+# will never auto-inject this variable.
 CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
 GITIGNORE_ENTRIES = (".claude", ".opencode", ".tamago/machine.env", ".tamago/machine.toml")
 
@@ -1534,48 +1530,37 @@ def setup_skills(
 # ---------------------------------------------------------------------------
 
 def setup_shell_env(operation: Operation, source_root: Path):
-    """Inject/remove ASSISTANT_SETUP_REPO in ~/.zshrc"""
+    """Migration cleanup: remove any ASSISTANT_SETUP_REPO that older tamago versions
+    auto-injected into ~/.zshrc.
+
+    Install is intentionally a no-op.  Tamago no longer auto-injects this variable —
+    if you need to point tamago at a non-conventional source directory, set
+    ASSISTANT_SETUP_REPO manually in your shell profile.
+
+    Uninstall removes stale entries written by older tamago versions.
+    """
+    if operation == Operation.INSTALL:
+        return
+
+    # UNINSTALL: clean up any entry written by an older tamago.
     zshrc = Path("~/.zshrc").expanduser()
+    if not zshrc.exists():
+        return
     env_key = "ASSISTANT_SETUP_REPO"
-    env_line = f'export {env_key}="{source_root}"'
     marker = f"{env_key}="
     comment = "# Tamago assistant repo"
-
-    if operation == Operation.INSTALL:
-        if source_root == CONVENTIONAL_ROOT:
-            print(f"skip    {env_key} injection (using default path, fallback covers it)")
-            return
-
-        lines = zshrc.read_text().splitlines() if zshrc.exists() else []
-        matching = [i for i, l in enumerate(lines) if marker in l]
-
-        if matching:
-            if env_line in lines[matching[0]]:
-                print(f"exists  {env_key} in ~/.zshrc")
-                return
-            lines[matching[0]] = env_line
-            zshrc.write_text("\n".join(lines) + "\n")
-            print(f"updated {env_key} in ~/.zshrc  (run: source ~/.zshrc)")
-        else:
-            with open(zshrc, "a") as f:
-                f.write(f"\n{comment}\n{env_line}\n")
-            print(f"added   {env_key} to ~/.zshrc  (run: source ~/.zshrc)")
-
-    elif operation == Operation.UNINSTALL:
-        if not zshrc.exists():
-            return
-        lines = zshrc.read_text().splitlines()
-        new_lines = [
-            l for i, l in enumerate(lines)
-            if marker not in l and not (
-                l.strip() == comment and i + 1 < len(lines) and marker in lines[i + 1]
-            )
-        ]
-        if new_lines != lines:
-            zshrc.write_text("\n".join(new_lines) + "\n")
-            print(f"removed {env_key} from ~/.zshrc  (run: source ~/.zshrc)")
-        else:
-            print(f"skip    {env_key} not found in ~/.zshrc")
+    lines = zshrc.read_text().splitlines()
+    new_lines = [
+        l for i, l in enumerate(lines)
+        if marker not in l and not (
+            l.strip() == comment and i + 1 < len(lines) and marker in lines[i + 1]
+        )
+    ]
+    if new_lines != lines:
+        zshrc.write_text("\n".join(new_lines) + "\n")
+        print(f"removed {env_key} from ~/.zshrc  (run: source ~/.zshrc)")
+    else:
+        print(f"skip    {env_key} not found in ~/.zshrc")
 
 
 # ---------------------------------------------------------------------------
@@ -1897,7 +1882,8 @@ def _setup_bootstrap_skill(operation: Operation, source_root: Path) -> None:
 
 def setup_global(operation: Operation, source_root: Path) -> int:
     """Home-level install: patch ~/.claude/settings.json, patch ~/.opencode/opencode.json,
-    update ~/.zshrc, install tamago's own git hooks, and bootstrap the hatch skill.
+    install tamago's own git hooks, bootstrap the hatch skill, and clean up any stale
+    shell env entries from older tamago versions.
     Each step runs independently — one failure does not block the others."""
     errors: list[str] = []
 
@@ -2386,16 +2372,24 @@ def resolve_profile_root(
 
 
 def resolve_source_root(source_override: str | None) -> Path:
-    source_root = source_override or os.environ.get("ASSISTANT_SETUP_REPO")
+    """Resolve the tamago source directory.
 
-    if source_root is None:
-        resolved_root = DEFAULT_SOURCE_ROOT
-    else:
-        resolved_root = Path(source_root).expanduser()
+    Priority (highest → lowest):
+      1. --source CLI argument (source_override)
+      2. ASSISTANT_SETUP_REPO environment variable (set manually by developer)
+      3. ~/.tamago  (CONVENTIONAL_ROOT — the standard install location)
+
+    Tamago never auto-injects ASSISTANT_SETUP_REPO.  If you need to point tamago
+    at a development checkout, set it explicitly in your shell profile.
+    """
+    source = source_override or os.environ.get("ASSISTANT_SETUP_REPO")
+    resolved_root = Path(source).expanduser() if source else CONVENTIONAL_ROOT
 
     if not resolved_root.is_dir():
-        raise ValueError(f"Source directory not found: {resolved_root}")
-
+        raise ValueError(
+            f"Source directory not found: {resolved_root}\n"
+            f"  Hint: clone tamago to ~/.tamago, or set ASSISTANT_SETUP_REPO=/path/to/tamago"
+        )
     return resolved_root
 
 

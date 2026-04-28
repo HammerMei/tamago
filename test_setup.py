@@ -129,23 +129,23 @@ class ResolveSourceRootTests(unittest.TestCase):
 
         self.assertEqual(resolved, Path(temp_dir))
 
-    def test_falls_back_to_default_path(self):
+    def test_falls_back_to_conventional_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            default_root = Path(temp_dir)
+            conventional = Path(temp_dir)
             with (
                 mock.patch.dict(os.environ, {}, clear=True),
-                mock.patch.object(sm, "DEFAULT_SOURCE_ROOT", default_root),
+                mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional),
             ):
                 resolved = sm.resolve_source_root(None)
 
-        self.assertEqual(resolved, default_root)
+        self.assertEqual(resolved, conventional)
 
     def test_raises_when_source_root_does_not_exist(self):
         missing_root = Path("/path/that/does/not/exist")
 
         with (
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch.object(sm, "DEFAULT_SOURCE_ROOT", missing_root),
+            mock.patch.object(sm, "CONVENTIONAL_ROOT", missing_root),
         ):
             with self.assertRaisesRegex(
                 ValueError, f"Source directory not found: {missing_root}"
@@ -4679,20 +4679,8 @@ class SetupShellEnvTests(unittest.TestCase):
         source.mkdir(parents=True)
         return source
 
-    def test_install_adds_env_when_zshrc_missing(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            source = self._make_source(root)
-            zshrc = root / "home" / ".zshrc"
-            zshrc.parent.mkdir(parents=True)  # ensure home dir exists
-
-            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
-                sm.setup_shell_env(sm.Operation.INSTALL, source)
-
-            self.assertTrue(zshrc.exists())
-            self.assertIn(str(source), zshrc.read_text())
-
-    def test_install_appends_env_when_marker_absent(self):
+    def test_install_is_noop(self):
+        """INSTALL must never touch ~/.zshrc regardless of source_root."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root)
@@ -4703,54 +4691,21 @@ class SetupShellEnvTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_shell_env(sm.Operation.INSTALL, source)
 
-            content = zshrc.read_text()
-            self.assertIn("ASSISTANT_SETUP_REPO", content)
-            self.assertIn("export FOO=bar", content)
+            # File must be completely unchanged
+            self.assertEqual(zshrc.read_text(), "export FOO=bar\n")
 
-    def test_install_updates_existing_marker(self):
+    def test_install_is_noop_when_zshrc_missing(self):
+        """INSTALL must not create ~/.zshrc if it does not exist."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root)
             zshrc = root / "home" / ".zshrc"
             zshrc.parent.mkdir(parents=True)
-            zshrc.write_text('export ASSISTANT_SETUP_REPO="/old/path"\n')
 
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_shell_env(sm.Operation.INSTALL, source)
 
-            content = zshrc.read_text()
-            self.assertIn(str(source), content)
-            self.assertNotIn("/old/path", content)
-
-    def test_install_skips_when_marker_matches(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            source = self._make_source(root)
-            env_line = f'export ASSISTANT_SETUP_REPO="{source}"'
-            zshrc = root / "home" / ".zshrc"
-            zshrc.parent.mkdir(parents=True)
-            zshrc.write_text(env_line + "\n")
-
-            out = io.StringIO()
-            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
-                with contextlib.redirect_stdout(out):
-                    sm.setup_shell_env(sm.Operation.INSTALL, source)
-
-            self.assertIn("exists", out.getvalue())
-            # Content unchanged
-            self.assertEqual(zshrc.read_text(), env_line + "\n")
-
-    def test_install_skips_when_conventional_root(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            out = io.StringIO()
-            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
-                with contextlib.redirect_stdout(out):
-                    sm.setup_shell_env(
-                        sm.Operation.INSTALL,
-                        sm.CONVENTIONAL_ROOT,
-                    )
-            self.assertIn("skip", out.getvalue())
+            self.assertFalse(zshrc.exists())
 
     def test_uninstall_removes_env_line(self):
         with tempfile.TemporaryDirectory() as td:
