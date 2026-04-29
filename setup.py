@@ -126,7 +126,7 @@ def unlink_paths(source_paths: list[Path], target_root: Path):
 def _agent_memory_link_names(agent_name: str) -> list[str]:
     """Return all symlink names to create for an agent's memory directory.
 
-    Claude Code 2.1.121 changed the agent-memory directory naming convention:
+    Claude Code 2.1.121+ changed the agent-memory directory naming convention:
     dots in agent names are replaced with hyphens when constructing the path
     (e.g. ``hammer.mei`` → ``hammer-mei``).  We create both forms pointing at
     the same source so installations work across Claude Code versions until
@@ -160,7 +160,7 @@ def _symlink_mem_dir(source: Path, target_root: Path) -> None:
             if any(target.iterdir()):
                 print(f"warning {target} is a non-empty directory — skipping symlink")
                 continue
-            # Empty dir auto-created by Claude Code (see issue #54208); replace.
+            # Empty dir auto-created by Claude Code 2.1.121+ (see issue #54208); replace.
             target.rmdir()
         elif target.exists():
             print(f"warning {target} exists and is not a symlink — skipping")

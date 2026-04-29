@@ -5268,7 +5268,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
 
 
     def test_memory_symlink_replaces_empty_dir_created_by_claude_code(self):
-        """An empty directory at the normalized path (auto-created by Claude Code 2.1.121)
+        """An empty directory at the normalized path (auto-created by Claude Code 2.1.121+)
         must be replaced with a symlink. See: github.com/anthropics/claude-code/issues/54208
         """
         with tempfile.TemporaryDirectory() as td:
@@ -5277,7 +5277,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             profile = self._make_profile_with_memory(root, "hammer.mei")
             project = root / "project"
 
-            # Pre-create the empty directory that Claude Code 2.1.121 auto-creates
+            # Pre-create the empty directory that Claude Code 2.1.121+ auto-creates
             empty_dir = project / ".claude" / "agent-memory" / "hammer-mei"
             empty_dir.mkdir(parents=True)
             self.assertTrue(empty_dir.is_dir())
