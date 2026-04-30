@@ -5294,6 +5294,202 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _merge_agent scope tests
+# ---------------------------------------------------------------------------
+
+class MergeAgentScopeTests(unittest.TestCase):
+    """Tests that _merge_agent and setup_agents correctly set memory scope.
+
+    The 'scope' parameter controls two things in the generated agent .md:
+      1. The ``memory:`` frontmatter field (project vs user).
+      2. The memory path references and warning text in the agent body.
+    """
+
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def fake(self):
+            s = str(self)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self)
+        return fake
+
+    def _make_source(self, root: Path) -> Path:
+        """Minimal source root with a tamago-agent-base.md using scope template vars."""
+        source = root / "tamago"
+        (source / "agents").mkdir(parents=True)
+        (source / "settings" / "claude").mkdir(parents=True)
+        (source / "settings" / "opencode" / "plugins").mkdir(parents=True)
+        (source / "settings" / "claude" / "settings.json").write_text("{}")
+        (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+        (source / "docs").mkdir(parents=True)
+        # Base template exercises all three scope-sensitive variables
+        (source / "docs" / "tamago-agent-base.md").write_text(
+            "via {{AGENT_MEMORY_LOCATION_DESC}}\n"
+            "{{AGENT_MEMORY_PATH_WARNING}}\n"
+            "path: {{AGENT_MEMORY_ROOT}}{{AGENT_MEMORY_DIR}}/\n"
+        )
+        return source
+
+    def _make_profile(self, root: Path, agent_name: str) -> Path:
+        profile = root / "profile"
+        (profile / "agents").mkdir(parents=True)
+        (profile / "agents" / f"{agent_name}.persona.md").write_text(
+            f"---\nname: {agent_name}\nmemory: project\n---\n# Persona\n"
+        )
+        return profile
+
+    def test_project_scope_sets_memory_project_in_frontmatter(self):
+        """Project-scope install generates agent.md with memory: project."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            sm.setup_agents(
+                sm.Operation.INSTALL, source, project,
+                profile_root=profile,
+                global_agents=set(),
+            )
+
+            content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
+            self.assertIn("memory: project", content)
+            self.assertNotIn("memory: user", content)
+
+    def test_global_scope_sets_memory_user_in_frontmatter(self):
+        """Global-scope install generates agent.md with memory: user (not project)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+                home_agents = root / "home" / ".claude" / "agents"
+                content = (home_agents / "hammer.mei.md").read_text()
+
+            self.assertIn("memory: user", content)
+            self.assertNotIn("memory: project", content)
+
+    def test_project_scope_body_uses_project_paths_and_warning(self):
+        """Project-scope body references .claude/agent-memory/ and warns about ~/.claude/."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            sm.setup_agents(
+                sm.Operation.INSTALL, source, project,
+                profile_root=profile,
+                global_agents=set(),
+            )
+
+            content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
+            # Body must use project-relative path
+            self.assertIn(".claude/agent-memory/hammer-mei/", content)
+            # Body must NOT reference home path
+            self.assertNotIn("~/.claude/agent-memory/", content)
+            # Warning about ~/.claude/ must be present for project scope
+            self.assertIn("Never write to `~/.claude/`", content)
+            # Scope description must be project-flavoured
+            self.assertIn("project-scope symlinks", content)
+
+    def test_global_scope_body_uses_home_paths_no_project_warning(self):
+        """Global-scope body references ~/.claude/agent-memory/ and omits project warning."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+                home_agents = root / "home" / ".claude" / "agents"
+                content = (home_agents / "hammer.mei.md").read_text()
+
+            # Body must use home path
+            self.assertIn("~/.claude/agent-memory/hammer-mei/", content)
+            # Must NOT falsely warn that ~/.claude/ is off-limits
+            self.assertNotIn("Never write to `~/.claude/`", content)
+            # Scope description must be user-flavoured
+            self.assertIn("user-scope directory", content)
+
+    def test_reinstall_project_to_global_updates_scope(self):
+        """Reinstalling as global after project correctly updates memory: user."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                # First install as project-scope
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents=set(),
+                )
+                proj_content = (
+                    project / ".claude" / "agents" / "hammer.mei.md"
+                ).read_text()
+                self.assertIn("memory: project", proj_content)
+
+                # Reinstall as global-scope
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+                home_agents = root / "home" / ".claude" / "agents"
+                global_content = (home_agents / "hammer.mei.md").read_text()
+
+            self.assertIn("memory: user", global_content)
+
+    def test_reinstall_global_to_project_updates_scope(self):
+        """Reinstalling as project after global correctly updates memory: project."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root)
+            profile = self._make_profile(root, "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                # First install as global-scope
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents={"hammer.mei"},
+                )
+                home_agents = root / "home" / ".claude" / "agents"
+                global_content = (home_agents / "hammer.mei.md").read_text()
+                self.assertIn("memory: user", global_content)
+
+                # Reinstall as project-scope
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile,
+                    global_agents=set(),
+                )
+
+            proj_content = (
+                project / ".claude" / "agents" / "hammer.mei.md"
+            ).read_text()
+            self.assertIn("memory: project", proj_content)
+            self.assertNotIn("memory: user", proj_content)
+
+
+# ---------------------------------------------------------------------------
 # main() / CLI dispatch
 # ---------------------------------------------------------------------------
 

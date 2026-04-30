@@ -1159,8 +1159,15 @@ def _merge_agent(
     persona_file: Path,
     target_dir: Path,
     tts_enabled: bool = True,
+    scope: str = "project",
 ) -> None:
-    """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md."""
+    """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md.
+
+    scope controls the Claude Code ``memory:`` frontmatter field and the memory
+    path references emitted in the agent body:
+      "project"  → memory: project, .claude/agent-memory/ (project-relative)
+      "user"     → memory: user,    ~/.claude/agent-memory/ (home-relative)
+    """
     # agent_name: strip the ".persona" suffix  (hammer.mei.persona.md → hammer.mei)
     agent_name = persona_file.stem  # e.g. "hammer.mei.persona"
     if agent_name.endswith(".persona"):
@@ -1175,12 +1182,41 @@ def _merge_agent(
 
     agent_memory_dir = agent_name.replace(".", "-")  # normalized per CC convention
 
+    # Scope-dependent memory values used to expand template variables.
+    if scope == "user":
+        _mem_root = "~/.claude/agent-memory/"
+        _mem_location_desc = "a user-scope directory at `~/.claude/agent-memory/`"
+        _mem_path_warning = (
+            f"> ⚠️ **Always use the path** `~/.claude/agent-memory/{agent_memory_dir}/`"
+            " for all Read/Write\n"
+            "> tool calls. Claude Code does not require permission approval to access"
+            " this directory.\n"
+            "> Never write directly to the absolute profile source path."
+        )
+        _mem_frontmatter_value = "user"
+    else:  # "project"
+        _mem_root = ".claude/agent-memory/"
+        _mem_location_desc = "project-scope symlinks under `.claude/agent-memory/`"
+        _mem_path_warning = (
+            f"> ⚠️ **Always use the symlink path** `.claude/agent-memory/{agent_memory_dir}/`"
+            " for all Read/Write\n"
+            "> tool calls — it lives inside the project directory and never requires"
+            " permission approval.\n"
+            "> Never write to `~/.claude/` or any absolute profile path — those are"
+            " outside the project\n"
+            "> scope and will trigger approval prompts."
+        )
+        _mem_frontmatter_value = "project"
+
     def _sub(text: str) -> str:
         return (
             text.replace("{{AGENT_NAME}}", agent_name)
                 .replace("{{AGENT_MEMORY_DIR}}", agent_memory_dir)
                 .replace("{{PROFILE_REPO}}", profile_path)
                 .replace("{{AGENT_MEMORY_PATH}}", memory_path)
+                .replace("{{AGENT_MEMORY_ROOT}}", _mem_root)
+                .replace("{{AGENT_MEMORY_LOCATION_DESC}}", _mem_location_desc)
+                .replace("{{AGENT_MEMORY_PATH_WARNING}}", _mem_path_warning)
         )
 
     base_content = _sub(base_file.read_text())
@@ -1193,6 +1229,16 @@ def _merge_agent(
         if len(parts) >= 3:
             frontmatter = "---" + parts[1] + "---\n"
             body = parts[2].lstrip("\n")
+
+    # Override memory scope in frontmatter to match install scope so Claude Code
+    # injects the correct memory path for this deployment.
+    if frontmatter:
+        frontmatter = re.sub(
+            r"^(memory:\s*)\S+",
+            rf"\g<1>{_mem_frontmatter_value}",
+            frontmatter,
+            flags=re.MULTILINE,
+        )
 
     header = (
         f"{GENERATED_HEADER_MARKER} — DO NOT EDIT DIRECTLY\n"
@@ -1344,8 +1390,9 @@ def setup_agents(
                         agent_name = agent_name[: -len(".persona")]
                     if agent_name in disabled_agents:
                         continue
-                    _merge_agent(source_root, profile_root, persona_file, _claude_dir(agent_name), tts_enabled)
-                    _merge_agent(source_root, profile_root, persona_file, _opencode_dir(agent_name), tts_enabled)
+                    agent_scope = "user" if agent_name in global_agents else "project"
+                    _merge_agent(source_root, profile_root, persona_file, _claude_dir(agent_name), tts_enabled, scope=agent_scope)
+                    _merge_agent(source_root, profile_root, persona_file, _opencode_dir(agent_name), tts_enabled, scope=agent_scope)
 
         # 3. Memory dirs — follow agent scope (same as agent file)
         #    Global agents: ~/.claude/agent-memory/  (accessible from any project)
