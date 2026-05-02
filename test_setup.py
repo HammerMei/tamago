@@ -1880,6 +1880,82 @@ class TamagoConfSettingsBlockTests(unittest.TestCase):
             self.assertIsNone(result)
 
 
+class CheckConfConflictsTests(unittest.TestCase):
+    """Unit tests for _check_conf_conflicts — pure function, no filesystem."""
+
+    def _make_conf(self, agents=(), skills=(), plugins=()):
+        """Build a TamagoConf from shorthand tuples (name, disable)."""
+        return sm.TamagoConf(
+            agents=[sm.AgentEntry(name=n, disable=d) for n, d in agents],
+            skills=[sm.SkillEntry(name=n, disable=d) for n, d in skills],
+            plugins=[sm.PluginEntry(name=n, repo="/fake", disable=d) for n, d in plugins],
+        )
+
+    def test_none_global_conf_returns_no_conflicts(self):
+        project = self._make_conf(agents=[("hammer.mei", False)])
+        self.assertEqual(sm._check_conf_conflicts(None, project), [])
+
+    def test_both_empty_returns_no_conflicts(self):
+        self.assertEqual(sm._check_conf_conflicts(
+            self._make_conf(), self._make_conf()
+        ), [])
+
+    def test_disjoint_agents_no_conflict(self):
+        g = self._make_conf(agents=[("agent-a", False)])
+        p = self._make_conf(agents=[("agent-b", False)])
+        self.assertEqual(sm._check_conf_conflicts(g, p), [])
+
+    def test_same_agent_in_both_is_conflict(self):
+        g = self._make_conf(agents=[("hammer.mei", False)])
+        p = self._make_conf(agents=[("hammer.mei", False)])
+        msgs = sm._check_conf_conflicts(g, p)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("hammer.mei", msgs[0])
+        self.assertIn("agent", msgs[0])
+
+    def test_same_skill_in_both_is_conflict(self):
+        g = self._make_conf(skills=[("nagori-skip", False)])
+        p = self._make_conf(skills=[("nagori-skip", False)])
+        msgs = sm._check_conf_conflicts(g, p)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("nagori-skip", msgs[0])
+        self.assertIn("skill", msgs[0])
+
+    def test_same_plugin_in_both_is_conflict(self):
+        g = self._make_conf(plugins=[("nagori", False)])
+        p = self._make_conf(plugins=[("nagori", False)])
+        msgs = sm._check_conf_conflicts(g, p)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("nagori", msgs[0])
+        self.assertIn("plugin", msgs[0])
+
+    def test_disabled_item_in_global_does_not_conflict(self):
+        """A disabled entry in the global conf is being removed — no conflict."""
+        g = self._make_conf(agents=[("hammer.mei", True)])   # disabled in global
+        p = self._make_conf(agents=[("hammer.mei", False)])  # active in project
+        self.assertEqual(sm._check_conf_conflicts(g, p), [])
+
+    def test_disabled_item_in_project_does_not_conflict(self):
+        """A disabled entry in the project conf is being removed — no conflict."""
+        g = self._make_conf(agents=[("hammer.mei", False)])  # active in global
+        p = self._make_conf(agents=[("hammer.mei", True)])   # disabled in project
+        self.assertEqual(sm._check_conf_conflicts(g, p), [])
+
+    def test_multiple_conflicts_all_reported(self):
+        g = self._make_conf(
+            agents=[("a", False)],
+            skills=[("s", False)],
+            plugins=[("p", False)],
+        )
+        p = self._make_conf(
+            agents=[("a", False)],
+            skills=[("s", False)],
+            plugins=[("p", False)],
+        )
+        msgs = sm._check_conf_conflicts(g, p)
+        self.assertEqual(len(msgs), 3)
+
+
 class InstallFromConfTests(unittest.TestCase):
     """Tests for install_from_conf (Slice C — TOML-driven install)."""
 
@@ -2144,6 +2220,99 @@ name = "edm_mei"
                 )
 
             self.assertIsNone(mock_setup.call_args.kwargs["agent_name"])
+
+    # ── Two-tier conflict detection ──────────────────────────────────────────
+
+    def test_conflict_with_global_conf_returns_1(self):
+        """install_from_conf returns 1 immediately if global + project conf share a name."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            source = Path(td) / "source"
+            source.mkdir()
+
+            # Project conf declares the same agent as global
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            conf_path.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
+
+            # Fake global conf with the same agent
+            global_conf = Path(td) / "global.conf"
+            global_conf.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
+
+            with mock.patch.object(sm, "run_health_check"):
+                rc = sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    global_conf_path=global_conf,
+                )
+        self.assertEqual(rc, 1)
+
+    def test_no_conflict_when_global_conf_missing(self):
+        """install_from_conf proceeds normally when global conf does not exist."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            source = Path(td) / "source"
+            source.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            conf_path.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
+
+            missing_global = Path(td) / "no-global.conf"  # does not exist
+
+            with mock.patch.object(sm, "run_health_check"):
+                with mock.patch.object(sm, "setup") as mock_setup:
+                    mock_setup.return_value = 0
+                    with mock.patch.object(sm, "setup_external_skills", return_value=0):
+                        with mock.patch.object(sm, "setup_plugins", return_value=0):
+                            with mock.patch.object(sm, "_write_install_machine_toml"):
+                                with mock.patch.object(sm, "add_project_to_registry"):
+                                    rc = sm.install_from_conf(
+                                        conf_path,
+                                        sm.Operation.INSTALL,
+                                        source,
+                                        project,
+                                        global_conf_path=missing_global,
+                                    )
+        self.assertEqual(rc, 0)
+
+    def test_disabled_global_item_does_not_block_install(self):
+        """A disabled entry in global conf does not trigger a conflict."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            source = Path(td) / "source"
+            source.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            conf_path.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
+
+            # Global conf has same name but disabled
+            global_conf = Path(td) / "global.conf"
+            global_conf.write_text(
+                '[[agents]]\nname = "hammer.mei"\nsource = "tamago"\ndisable = true\n'
+            )
+
+            with mock.patch.object(sm, "run_health_check"):
+                with mock.patch.object(sm, "setup") as mock_setup:
+                    mock_setup.return_value = 0
+                    with mock.patch.object(sm, "setup_external_skills", return_value=0):
+                        with mock.patch.object(sm, "setup_plugins", return_value=0):
+                            with mock.patch.object(sm, "_write_install_machine_toml"):
+                                with mock.patch.object(sm, "add_project_to_registry"):
+                                    rc = sm.install_from_conf(
+                                        conf_path,
+                                        sm.Operation.INSTALL,
+                                        source,
+                                        project,
+                                        global_conf_path=global_conf,
+                                    )
+        self.assertEqual(rc, 0)
 
 
 class SkillRepoCacheTests(unittest.TestCase):

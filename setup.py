@@ -2346,6 +2346,52 @@ def _write_install_machine_toml(
     write_machine_toml(path, MachineToml(profiles=profiles, skill_cache=skill_cache))
 
 
+# ---------------------------------------------------------------------------
+# Two-tier conflict detection  (Step 3)
+# ---------------------------------------------------------------------------
+
+def _check_conf_conflicts(
+    global_conf: "TamagoConf | None",
+    project_conf: "TamagoConf",
+) -> list[str]:
+    """Return human-readable conflict messages for items declared in both tiers.
+
+    The two tiers are additive: the same agent/skill/plugin name must not appear
+    in both ~/.tamago/tamago.conf and <project>/.tamago/tamago.conf at the same
+    time.  Disabled items (disable=True) are excluded — they are being removed,
+    not installed, so overlap is harmless.
+
+    Returns an empty list when there are no conflicts (including when global_conf
+    is None, i.e. no global conf exists).
+    """
+    if global_conf is None:
+        return []
+
+    conflicts: list[str] = []
+
+    global_agents  = {a.name for a in global_conf.agents  if not a.disable}
+    global_skills  = {s.name for s in global_conf.skills  if not s.disable}
+    global_plugins = {p.name for p in global_conf.plugins if not p.disable}
+
+    for a in project_conf.agents:
+        if not a.disable and a.name in global_agents:
+            conflicts.append(
+                f"agent '{a.name}' is declared in both global and project tamago.conf"
+            )
+    for s in project_conf.skills:
+        if not s.disable and s.name in global_skills:
+            conflicts.append(
+                f"skill '{s.name}' is declared in both global and project tamago.conf"
+            )
+    for p in project_conf.plugins:
+        if not p.disable and p.name in global_plugins:
+            conflicts.append(
+                f"plugin '{p.name}' is declared in both global and project tamago.conf"
+            )
+
+    return conflicts
+
+
 def install_from_conf(
     conf_path: Path,
     operation: Operation,
@@ -2354,6 +2400,7 @@ def install_from_conf(
     pull_cached_skills: bool = False,
     cache_root: Path = DEFAULT_CACHE_ROOT,
     registry_path: Path = KNOWN_PROJECTS_FILE,
+    global_conf_path: Path = GLOBAL_CONF_PATH,
 ) -> int:
     """Install/uninstall all agents and skills declared in a tamago.conf TOML file.
 
@@ -2388,6 +2435,19 @@ def install_from_conf(
         print(
             f"error   tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
             f"only one is supported in this version",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Two-tier conflict check: same name in both global and project conf is an error.
+    global_conf = load_tamago_conf(global_conf_path)
+    conflicts = _check_conf_conflicts(global_conf, conf)
+    if conflicts:
+        for msg in conflicts:
+            print(f"error   {msg}", file=sys.stderr)
+        print(
+            "error   resolve conflicts before installing: remove duplicate entries from "
+            "either the global (~/.tamago/tamago.conf) or project (.tamago/tamago.conf) conf",
             file=sys.stderr,
         )
         return 1
