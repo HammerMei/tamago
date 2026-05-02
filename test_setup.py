@@ -4987,6 +4987,183 @@ class SetupGlobalTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# install_global_from_conf (two-tier refactor Step 1)
+# ---------------------------------------------------------------------------
+
+class InstallGlobalFromConfTests(unittest.TestCase):
+    """Tests for install_global_from_conf — the new two-tier global install path."""
+
+    # Full set of non-infra functions that install_global_from_conf calls when
+    # conf is present.  Mocking them keeps tests hermetic.
+    _CONF_DRIVEN_MOCKS = (
+        "setup_agents",
+        "setup_skills",
+        "setup_settings",
+        "setup_external_skills",
+        "setup_plugins",
+        "write_machine_env",
+        "_write_install_machine_toml",
+        "run_health_check",
+    )
+
+    def _all_mocks(self, **overrides):
+        """Return a dict of patch-name → mock for all side-effectful functions."""
+        patches: dict[str, mock.Mock] = {
+            # Infra steps
+            "patch_global_settings": mock.Mock(),
+            "patch_opencode_global_settings": mock.Mock(),
+            "setup_shell_env": mock.Mock(),
+            "setup_git_hooks": mock.Mock(),
+            "setup_local_bin": mock.Mock(),
+            "_setup_bootstrap_skill": mock.Mock(),
+            # Conf-driven steps (return 0 by default for the int-returning ones)
+            "setup_agents": mock.Mock(),
+            "setup_skills": mock.Mock(),
+            "setup_settings": mock.Mock(),
+            "setup_external_skills": mock.Mock(return_value=0),
+            "setup_plugins": mock.Mock(return_value=0),
+            "write_machine_env": mock.Mock(),
+            "_write_install_machine_toml": mock.Mock(),
+            "run_health_check": mock.Mock(),
+        }
+        patches.update(overrides)
+        return patches
+
+    def _run(self, conf_path, operation, source_root, patches=None, **kwargs):
+        """Call install_global_from_conf with the given patches active."""
+        if patches is None:
+            patches = self._all_mocks()
+        ctx_managers = [mock.patch.object(sm, k, v) for k, v in patches.items()]
+        with contextlib.ExitStack() as stack:
+            for cm in ctx_managers:
+                stack.enter_context(cm)
+            rc = sm.install_global_from_conf(
+                conf_path, operation, source_root, **kwargs
+            )
+        return rc, patches
+
+    def test_infra_runs_even_when_no_conf_exists(self):
+        """All six infra steps run even if ~/.tamago/tamago.conf does not exist."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "no-such.conf"  # deliberately absent
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+            for step in ("patch_global_settings", "patch_opencode_global_settings",
+                         "setup_shell_env", "setup_git_hooks", "setup_local_bin",
+                         "_setup_bootstrap_skill"):
+                patches[step].assert_called_once()
+
+    def test_no_conf_writes_starter_template(self):
+        """Missing conf on INSTALL → a commented-out template is written."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            self.assertFalse(conf.exists())
+
+            rc, _ = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+            self.assertTrue(conf.exists(), "template should have been written")
+            content = conf.read_text()
+            active_lines = [ln for ln in content.splitlines()
+                            if ln.strip() and not ln.strip().startswith("#")]
+            self.assertEqual(active_lines, [], f"unexpected active lines: {active_lines}")
+            self.assertEqual(rc, 0)
+
+    def test_no_conf_returns_0(self):
+        """Missing conf is not an error — returns 0 after writing template."""
+        with tempfile.TemporaryDirectory() as td:
+            rc, _ = self._run(Path(td) / "missing.conf", sm.Operation.INSTALL, Path(td))
+        self.assertEqual(rc, 0)
+
+    def test_bad_conf_returns_1_infra_still_runs(self):
+        """Unparseable conf returns 1 but infra still ran."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text("[[[[invalid toml")
+
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        self.assertEqual(rc, 1)
+        patches["patch_global_settings"].assert_called_once()
+
+    def test_empty_conf_returns_0(self):
+        """Valid but empty conf (comment-only) returns 0."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text("# empty\n")
+
+            rc, _ = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        self.assertEqual(rc, 0)
+
+    def test_multiple_profiles_returns_1(self):
+        """Global conf with more than one [[profiles]] entry is rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text('[[profiles]]\nname = "a"\n[[profiles]]\nname = "b"\n')
+            rc, _ = self._run(conf, sm.Operation.INSTALL, Path(td))
+        self.assertEqual(rc, 1)
+
+    def test_conf_with_plugin_calls_setup_plugins(self):
+        """A [[plugins]] entry causes setup_plugins to be called with the plugin."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text('[[plugins]]\nname = "nagori"\nrepo = "/tmp/fake-repo"\n')
+
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        patches["setup_plugins"].assert_called_once()
+        plugins_arg = patches["setup_plugins"].call_args[0][1]
+        self.assertEqual(len(plugins_arg), 1)
+        self.assertEqual(plugins_arg[0].name, "nagori")
+        self.assertEqual(rc, 0)
+
+    def test_conf_with_agent_passes_all_as_global_agents(self):
+        """All non-disabled agents in the global conf are in global_agents kwarg."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
+
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        patches["setup_agents"].assert_called_once()
+        _, kwargs = patches["setup_agents"].call_args
+        self.assertIn("hammer.mei", kwargs.get("global_agents", set()))
+        self.assertEqual(rc, 0)
+
+    def test_infra_failure_returns_1_conf_items_still_processed(self):
+        """An infra step failure accumulates the error but processing continues."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text("# empty\n")
+
+            patches = self._all_mocks(
+                patch_global_settings=mock.Mock(side_effect=RuntimeError("boom")),
+            )
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td), patches=patches)
+
+        self.assertEqual(rc, 1)
+        # Other infra steps must still have run
+        patches["setup_git_hooks"].assert_called_once()
+        # Conf-driven steps also ran
+        patches["setup_agents"].assert_called_once()
+
+    def test_uninstall_removes_global_machine_toml(self):
+        """On UNINSTALL, global machine.toml is deleted if it exists."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text("# empty\n")
+            # Create a fake machine.toml at the global path we'll redirect to
+            fake_toml = Path(td) / "machine.toml"
+            fake_toml.write_text("[profiles]\n")
+
+            with mock.patch.object(sm, "GLOBAL_MACHINE_TOML_PATH", fake_toml):
+                rc, _ = self._run(conf, sm.Operation.UNINSTALL, Path(td))
+
+        self.assertFalse(fake_toml.exists(), "global machine.toml should be removed on uninstall")
+        self.assertEqual(rc, 0)
+
+
+# ---------------------------------------------------------------------------
 # setup_skills — bin/ entry points and UNINSTALL
 # ---------------------------------------------------------------------------
 
@@ -5526,29 +5703,37 @@ class MainCliDispatchTests(unittest.TestCase):
             with ctx:
                 return sm.main()
 
-    def test_install_global_calls_setup_global(self):
+    def test_install_global_calls_install_global_from_conf(self):
         with tempfile.TemporaryDirectory() as td:
             source = self._make_minimal_source(Path(td))
-            sg_mock = mock.Mock(return_value=0)
+            igfc_mock = mock.Mock(return_value=0)
             rc = self._run(
                 ["install-global"],
                 source_root=source,
-                extra_patches={"setup_global": sg_mock},
+                extra_patches={"install_global_from_conf": igfc_mock},
             )
             self.assertEqual(rc, 0)
-            sg_mock.assert_called_once_with(sm.Operation.INSTALL, source)
+            igfc_mock.assert_called_once()
+            args, kwargs = igfc_mock.call_args
+            self.assertEqual(args[0], sm.GLOBAL_CONF_PATH)
+            self.assertEqual(args[1], sm.Operation.INSTALL)
+            self.assertEqual(args[2], source)
 
-    def test_uninstall_global_calls_setup_global_uninstall(self):
+    def test_uninstall_global_calls_install_global_from_conf_uninstall(self):
         with tempfile.TemporaryDirectory() as td:
             source = self._make_minimal_source(Path(td))
-            sg_mock = mock.Mock(return_value=0)
+            igfc_mock = mock.Mock(return_value=0)
             rc = self._run(
                 ["uninstall-global"],
                 source_root=source,
-                extra_patches={"setup_global": sg_mock},
+                extra_patches={"install_global_from_conf": igfc_mock},
             )
             self.assertEqual(rc, 0)
-            sg_mock.assert_called_once_with(sm.Operation.UNINSTALL, source)
+            igfc_mock.assert_called_once()
+            args, kwargs = igfc_mock.call_args
+            self.assertEqual(args[0], sm.GLOBAL_CONF_PATH)
+            self.assertEqual(args[1], sm.Operation.UNINSTALL)
+            self.assertEqual(args[2], source)
 
     def test_update_treated_as_install_from_conf(self):
         with tempfile.TemporaryDirectory() as td:
@@ -6233,6 +6418,624 @@ class SetupSettingsScopeTests(unittest.TestCase):
             data = json.loads(settings.read_text())
             self.assertNotIn("agent", data)
             self.assertTrue(data.get("pluginX"), "profile settings should still be merged")
+
+
+class TestLoadTamagoConfPlugins(unittest.TestCase):
+    """Tests for [[plugins]] parsing in load_tamago_conf."""
+
+    def _write(self, td: Path, content: str) -> Path:
+        p = td / "tamago.conf"
+        p.write_text(content)
+        return p
+
+    def test_parses_plugins_section(self):
+        """[[plugins]] entries are parsed into PluginEntry objects."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name  = "nagori"
+repo  = "/opt/nagori"
+scope = "project"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(len(conf.plugins), 1)
+            plugin = conf.plugins[0]
+            self.assertEqual(plugin.name, "nagori")
+            self.assertEqual(plugin.repo, "/opt/nagori")
+            self.assertEqual(plugin.scope, "project")
+            self.assertFalse(plugin.disable)
+
+    def test_plugin_defaults(self):
+        """scope defaults to 'global' and disable defaults to False."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name = "myplugin"
+repo = "/some/path"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            plugin = conf.plugins[0]
+            self.assertEqual(plugin.scope, "global")
+            self.assertFalse(plugin.disable)
+
+    def test_plugin_disable_true(self):
+        """disable = true is parsed correctly."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name    = "nagori"
+repo    = "/opt/nagori"
+disable = true
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertTrue(conf.plugins[0].disable)
+
+    def test_plugin_missing_repo_is_skipped(self):
+        """An entry without 'repo' is silently skipped."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name = "no-repo-plugin"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(conf.plugins, [])
+
+    def test_plugin_tilde_expansion(self):
+        """Tilde in repo is expanded via expanduser."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name = "nagori"
+repo = "~/workspace/nagori"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            expanded = conf.plugins[0].repo
+            self.assertFalse(expanded.startswith("~"),
+                             f"Expected tilde to be expanded, got: {expanded}")
+            self.assertIn("workspace/nagori", expanded)
+
+    def test_no_plugins_section_returns_empty_list(self):
+        """A conf with no [[plugins]] has an empty plugins list."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), "[settings]\nmemory_sync = true\n")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(conf.plugins, [])
+
+    def test_multiple_plugins_parsed(self):
+        """Multiple [[plugins]] entries are all parsed."""
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(Path(td), """
+[[plugins]]
+name = "alpha"
+repo = "/opt/alpha"
+
+[[plugins]]
+name = "beta"
+repo = "/opt/beta"
+scope = "project"
+""")
+            conf = sm.load_tamago_conf(p)
+            self.assertIsNotNone(conf)
+            self.assertEqual(len(conf.plugins), 2)
+            self.assertEqual(conf.plugins[0].name, "alpha")
+            self.assertEqual(conf.plugins[1].name, "beta")
+
+
+class TestIsGitUrl(unittest.TestCase):
+    """Tests for _is_git_url()."""
+
+    def test_https_url(self):
+        self.assertTrue(sm._is_git_url("https://github.com/you/repo.git"))
+
+    def test_http_url(self):
+        self.assertTrue(sm._is_git_url("http://github.com/you/repo.git"))
+
+    def test_git_at_url(self):
+        self.assertTrue(sm._is_git_url("git@github.com:you/repo.git"))
+
+    def test_ssh_url(self):
+        self.assertTrue(sm._is_git_url("ssh://git@github.com/you/repo.git"))
+
+    def test_absolute_path(self):
+        self.assertFalse(sm._is_git_url("/home/user/workspace/nagori"))
+
+    def test_tilde_path(self):
+        # tilde is already expanded at parse time, but just in case
+        self.assertFalse(sm._is_git_url("~/workspace/nagori"))
+
+    def test_relative_path(self):
+        self.assertFalse(sm._is_git_url("../nagori"))
+
+
+class TestSetupPlugins(unittest.TestCase):
+    """Tests for setup_plugins()."""
+
+    def _make_plugin_repo(self, root: Path, name: str, has_install: bool = True) -> Path:
+        repo = root / name
+        repo.mkdir(parents=True, exist_ok=True)
+        if has_install:
+            install_py = repo / "install.py"
+            install_py.write_text("# stub install.py")
+        return repo
+
+    def test_calls_install_script_on_install(self):
+        """setup_plugins calls <repo>/install.py install --scope global."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="global")
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=0)
+                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            self.assertEqual(rc, 0)
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertIn("install", cmd)
+            self.assertIn("--scope", cmd)
+            self.assertIn("global", cmd)
+            # project flag must NOT be passed for global scope
+            self.assertNotIn("--project", cmd)
+
+    def test_calls_install_script_on_uninstall(self):
+        """setup_plugins calls <repo>/install.py uninstall --scope global."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="global")
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=0)
+                rc = sm.setup_plugins(sm.Operation.UNINSTALL, [plugin], project)
+
+            self.assertEqual(rc, 0)
+            cmd = mock_run.call_args[0][0]
+            self.assertIn("uninstall", cmd)
+
+    def test_project_scope_passes_project_flag(self):
+        """scope='project' passes --project <project_root> to install.py."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="project")
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=0)
+                sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            cmd = mock_run.call_args[0][0]
+            self.assertIn("--project", cmd)
+            proj_idx = cmd.index("--project")
+            self.assertEqual(cmd[proj_idx + 1], str(project))
+
+    def test_missing_install_py_is_warning_not_error(self):
+        """A plugin without install.py emits a warning but returns 0."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin", has_install=False)
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
+            with mock.patch("subprocess.run") as mock_run:
+                with contextlib.redirect_stderr(io.StringIO()) as err_out:
+                    rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            self.assertEqual(rc, 0)
+            mock_run.assert_not_called()
+            self.assertIn("install.py not found", err_out.getvalue())
+
+    def test_disabled_plugin_skipped_on_install(self):
+        """disable=True → plugin is not called during INSTALL."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), disable=True)
+            with mock.patch("subprocess.run") as mock_run:
+                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            self.assertEqual(rc, 0)
+            mock_run.assert_not_called()
+
+    def test_disabled_plugin_still_runs_on_uninstall(self):
+        """disable=True does NOT skip UNINSTALL — cleanup must still happen."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), disable=True)
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=0)
+                rc = sm.setup_plugins(sm.Operation.UNINSTALL, [plugin], project)
+
+            self.assertEqual(rc, 0)
+            mock_run.assert_called_once()
+
+    def test_nonzero_exit_code_returns_1(self):
+        """A plugin that exits non-zero causes setup_plugins to return 1."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=1)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            self.assertEqual(rc, 1)
+
+    def test_empty_plugins_list_returns_0(self):
+        """No plugins → returns 0 immediately."""
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            rc = sm.setup_plugins(sm.Operation.INSTALL, [], project)
+            self.assertEqual(rc, 0)
+
+    def test_multiple_plugins_all_succeed(self):
+        """All plugins succeed → returns 0."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo_a = self._make_plugin_repo(root, "alpha")
+            repo_b = self._make_plugin_repo(root, "beta")
+            project = root / "project"
+            project.mkdir()
+
+            plugins = [
+                sm.PluginEntry(name="alpha", repo=str(repo_a)),
+                sm.PluginEntry(name="beta", repo=str(repo_b)),
+            ]
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(returncode=0)
+                rc = sm.setup_plugins(sm.Operation.INSTALL, plugins, project)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_one_failure_among_multiple_returns_1(self):
+        """If one plugin fails, returns 1 but still calls the rest."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo_a = self._make_plugin_repo(root, "alpha")
+            repo_b = self._make_plugin_repo(root, "beta")
+            project = root / "project"
+            project.mkdir()
+
+            plugins = [
+                sm.PluginEntry(name="alpha", repo=str(repo_a)),
+                sm.PluginEntry(name="beta", repo=str(repo_b)),
+            ]
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.side_effect = [
+                    mock.Mock(returncode=1),   # alpha fails
+                    mock.Mock(returncode=0),   # beta succeeds
+                ]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = sm.setup_plugins(sm.Operation.INSTALL, plugins, project)
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(mock_run.call_count, 2)  # both were still called
+
+    def test_git_url_repo_cloned_before_install(self):
+        """A git URL repo is resolved via clone/cache before install.py is called."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache_root = root / "cache"
+            # Simulate a pre-existing cache dir (clone already done)
+            fake_cache = cache_root / "abc123"
+            fake_cache.mkdir(parents=True)
+            (fake_cache / ".git").mkdir()
+            (fake_cache / "install.py").write_text("# stub")
+            project = root / "project"
+            project.mkdir()
+
+            url = "https://github.com/you/nagori.git"
+            plugin = sm.PluginEntry(name="nagori", repo=url, scope="global")
+
+            with (
+                mock.patch.object(sm, "_skill_repo_cache_dir", return_value=fake_cache),
+                mock.patch.object(sm, "_clone_or_reuse_skill_repo", return_value=fake_cache) as mock_clone,
+                mock.patch("subprocess.run") as mock_run,
+            ):
+                mock_run.return_value = mock.Mock(returncode=0)
+                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project,
+                                      cache_root=cache_root)
+
+            self.assertEqual(rc, 0)
+            mock_clone.assert_called_once_with(url, fake_cache)
+            # install.py inside the cache dir is called
+            cmd = mock_run.call_args[0][0]
+            self.assertIn(str(fake_cache / "install.py"), cmd)
+
+    def test_git_url_clone_failure_counts_as_error(self):
+        """If _clone_or_reuse_skill_repo raises, plugin is counted as error."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+
+            url = "https://github.com/you/nagori.git"
+            plugin = sm.PluginEntry(name="nagori", repo=url)
+
+            with (
+                mock.patch.object(sm, "_skill_repo_cache_dir", return_value=root / "cache"),
+                mock.patch.object(sm, "_clone_or_reuse_skill_repo",
+                                  side_effect=Exception("git clone failed")),
+                mock.patch("subprocess.run") as mock_run,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            self.assertEqual(rc, 1)
+            mock_run.assert_not_called()
+
+    def test_local_path_does_not_call_clone(self):
+        """A local path plugin skips _clone_or_reuse_skill_repo entirely."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self._make_plugin_repo(root, "myplugin")
+            project = root / "project"
+            project.mkdir()
+
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
+            with (
+                mock.patch.object(sm, "_clone_or_reuse_skill_repo") as mock_clone,
+                mock.patch("subprocess.run") as mock_run,
+            ):
+                mock_run.return_value = mock.Mock(returncode=0)
+                sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+
+            mock_clone.assert_not_called()
+
+
+class TestPullPluginRepos(unittest.TestCase):
+    """Tests for _pull_plugin_repos()."""
+
+    def test_pulls_url_based_plugin(self):
+        """URL-based plugins with an existing cache dir are pulled."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache_root = root / "cache"
+            url = "https://github.com/you/nagori.git"
+            # Simulate an existing clone
+            fake_cache = cache_root / "somehash"
+            fake_cache.mkdir(parents=True)
+            (fake_cache / ".git").mkdir()
+
+            plugin = sm.PluginEntry(name="nagori", repo=url)
+            with (
+                mock.patch.object(sm, "_skill_repo_cache_dir", return_value=fake_cache),
+                mock.patch.object(sm, "pull_repo") as mock_pull,
+            ):
+                sm._pull_plugin_repos([plugin], cache_root)
+
+            mock_pull.assert_called_once_with(fake_cache, url)
+
+    def test_skips_local_path_plugin(self):
+        """Local-path plugins are not touched by _pull_plugin_repos."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "cache"
+            plugin = sm.PluginEntry(name="nagori", repo="/opt/nagori")
+            with mock.patch.object(sm, "pull_repo") as mock_pull:
+                sm._pull_plugin_repos([plugin], cache_root)
+            mock_pull.assert_not_called()
+
+    def test_skips_uncached_url_repo(self):
+        """A URL plugin not yet cloned is silently skipped (will be cloned during setup)."""
+        with tempfile.TemporaryDirectory() as td:
+            cache_root = Path(td) / "cache"
+            url = "https://github.com/you/nagori.git"
+            # cache_dir does NOT exist
+            fake_cache = cache_root / "somehash"
+            plugin = sm.PluginEntry(name="nagori", repo=url)
+            with (
+                mock.patch.object(sm, "_skill_repo_cache_dir", return_value=fake_cache),
+                mock.patch.object(sm, "pull_repo") as mock_pull,
+            ):
+                sm._pull_plugin_repos([plugin], cache_root)
+            mock_pull.assert_not_called()
+
+    def test_deduplicates_same_url(self):
+        """The same git URL appearing twice is only pulled once."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache_root = root / "cache"
+            url = "https://github.com/you/nagori.git"
+            fake_cache = cache_root / "somehash"
+            fake_cache.mkdir(parents=True)
+            (fake_cache / ".git").mkdir()
+
+            plugins = [
+                sm.PluginEntry(name="nagori-a", repo=url),
+                sm.PluginEntry(name="nagori-b", repo=url),
+            ]
+            with (
+                mock.patch.object(sm, "_skill_repo_cache_dir", return_value=fake_cache),
+                mock.patch.object(sm, "pull_repo") as mock_pull,
+            ):
+                sm._pull_plugin_repos(plugins, cache_root)
+
+            mock_pull.assert_called_once()
+
+
+class TestInstallFromConfPlugins(unittest.TestCase):
+    """Integration tests: setup_plugins wired into install_from_conf."""
+
+    def _write_toml(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_setup_plugins_called_after_external_skills(self):
+        """setup_plugins is called when install_from_conf succeeds."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[plugins]]
+name = "nagori"
+repo = "/opt/nagori"
+""")
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0) as mock_plugins,
+            ):
+                result = sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 0)
+            mock_plugins.assert_called_once()
+
+    def test_setup_plugins_failure_propagates(self):
+        """setup_plugins returning 1 → install_from_conf returns 1."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=1),
+            ):
+                result = sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 1)
+
+    def test_setup_plugins_not_called_when_setup_fails(self):
+        """If setup() returns 1, setup_plugins is NOT called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(sm, "setup", return_value=1),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills"),
+                mock.patch.object(sm, "setup_plugins") as mock_plugins,
+            ):
+                result = sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(result, 1)
+            mock_plugins.assert_not_called()
+
+    def test_plugins_passed_to_setup_plugins(self):
+        """Plugins parsed from tamago.conf are forwarded to setup_plugins."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[plugins]]
+name  = "nagori"
+repo  = "/opt/nagori"
+scope = "project"
+""")
+            captured_plugins = []
+
+            def capture_plugins(op, plugins, project_root, cache_root=None):
+                captured_plugins.extend(plugins)
+                return 0
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", side_effect=capture_plugins),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                )
+
+            self.assertEqual(len(captured_plugins), 1)
+            self.assertEqual(captured_plugins[0].name, "nagori")
+            self.assertEqual(captured_plugins[0].scope, "project")
+
+    def test_pull_cached_true_pulls_plugin_repos(self):
+        """pull_cached_skills=True → _pull_plugin_repos is called for plugins too."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            self._write_toml(conf_path, """
+[[plugins]]
+name = "nagori"
+repo = "https://github.com/you/nagori.git"
+""")
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_pull_skill_repos"),
+                mock.patch.object(sm, "_pull_plugin_repos") as mock_pull_plugins,
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                    pull_cached_skills=True,
+                )
+
+            mock_pull_plugins.assert_called_once()
+
+    def test_pull_cached_false_does_not_pull_plugin_repos(self):
+        """pull_cached_skills=False → _pull_plugin_repos is NOT called."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_pull_plugin_repos") as mock_pull_plugins,
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                    pull_cached_skills=False,
+                )
+
+            mock_pull_plugins.assert_not_called()
 
 
 if __name__ == "__main__":

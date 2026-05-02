@@ -242,6 +242,10 @@ def setup_gitignore(operation: Operation, project_root: Path):
 PROJECT_CONF_NAME = "tamago.conf"  # lives inside <project_dir>/.tamago/
 MACHINE_TOML_NAME = "machine.toml"  # machine-local install state (Slice E)
 
+# Global conf and machine.toml paths (Step 2: two-tier refactor).
+GLOBAL_CONF_PATH = CONVENTIONAL_ROOT / PROJECT_CONF_NAME   # ~/.tamago/tamago.conf
+GLOBAL_MACHINE_TOML_PATH = CONVENTIONAL_ROOT / MACHINE_TOML_NAME  # ~/.tamago/machine.toml
+
 
 def _write_conf_file(path: Path, lines: list[str]) -> None:
     content = "\n".join(lines) + "\n"
@@ -283,10 +287,19 @@ class SkillEntry:
 
 
 @dataclass
+class PluginEntry:
+    name: str
+    repo: str                 # required: path to plugin repo (expanduser applied at parse time)
+    scope: str = "global"     # "global" | "project"
+    disable: bool = False
+
+
+@dataclass
 class TamagoConf:
     profiles: list[ProfileEntry] = dataclass_field(default_factory=list)
     agents: list[AgentEntry] = dataclass_field(default_factory=list)
     skills: list[SkillEntry] = dataclass_field(default_factory=list)
+    plugins: list[PluginEntry] = dataclass_field(default_factory=list)
     memory_sync: bool = True
 
 
@@ -339,6 +352,16 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             for s in raw.get("skills", [])
             if "name" in s
         ]
+        plugins = [
+            PluginEntry(
+                name=pl["name"],
+                repo=os.path.expanduser(pl["repo"]),
+                scope=pl.get("scope", "global"),
+                disable=pl.get("disable", False),
+            )
+            for pl in raw.get("plugins", [])
+            if "name" in pl and "repo" in pl
+        ]
         settings_block = raw.get("settings", {})
         if not isinstance(settings_block, dict):
             return None
@@ -349,6 +372,7 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             profiles=profiles,
             agents=agents,
             skills=skills,
+            plugins=plugins,
             memory_sync=raw_sync,
         )
     except (OSError, tomllib.TOMLDecodeError, TypeError, AttributeError, KeyError, ValueError):
@@ -1891,6 +1915,95 @@ def setup_external_skills(
     return 1 if errors else 0
 
 
+def _is_git_url(s: str) -> bool:
+    """Return True if s looks like a git remote URL rather than a local path."""
+    return s.startswith(("https://", "http://", "git@", "ssh://"))
+
+
+def _pull_plugin_repos(plugins: list["PluginEntry"], cache_root: Path) -> None:
+    """Pull (update) each unique URL-sourced plugin repo once.
+
+    Skips repos not yet cloned — they'll be cloned fresh when setup_plugins runs.
+    Local-path plugins are not touched (caller owns those).
+    """
+    seen: set[str] = set()
+    for plugin in plugins:
+        url = plugin.repo
+        if not _is_git_url(url) or url in seen:
+            continue
+        seen.add(url)
+        cache_dir = _skill_repo_cache_dir(url, cache_root)
+        if cache_dir.is_dir() and (cache_dir / ".git").exists():
+            pull_repo(cache_dir, url)
+
+
+def setup_plugins(
+    operation: Operation,
+    plugins: list["PluginEntry"],
+    project_root: Path,
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+) -> int:
+    """Run each plugin's install.py with the requested operation and scope.
+
+    Plugin contract:
+      <plugin.repo>/install.py {install,uninstall} --scope {global|project}
+                               [--project <project_root>]   # only when scope=project
+
+    plugin.repo may be either:
+      - A local path (absolute or starting with ~, already expanduser'd at parse time)
+      - A git remote URL (https://, http://, git@, ssh://) — cloned/cached under
+        cache_root using the same mechanism as external skills.
+
+    Plugins whose `disable` flag is True are skipped on INSTALL but will
+    still be uninstalled when `disable` is newly set (tamago calls UNINSTALL
+    before re-running INSTALL, so the plugin gets cleaned up first).
+
+    Missing install.py is a warning, not a hard failure — the rest of the
+    plugins still run.  Returns 0 on success, 1 if any plugin call fails.
+    """
+    errors = 0
+    for plugin in plugins:
+        if plugin.disable and operation == Operation.INSTALL:
+            print(f"skip    plugin {plugin.name} (disabled)")
+            continue
+
+        # Resolve repo dir — clone from remote or use local path directly.
+        try:
+            if _is_git_url(plugin.repo):
+                cache_dir = _skill_repo_cache_dir(plugin.repo, cache_root)
+                repo = _clone_or_reuse_skill_repo(plugin.repo, cache_dir)
+            else:
+                repo = Path(plugin.repo)
+        except Exception as e:
+            print(f"error   plugin {plugin.name}: {e}", file=sys.stderr)
+            errors += 1
+            continue
+
+        install_script = repo / "install.py"
+        if not install_script.exists():
+            print(
+                f"warn    plugin {plugin.name}: install.py not found at {install_script}",
+                file=sys.stderr,
+            )
+            continue
+
+        cmd = [sys.executable, str(install_script), operation.value,
+               "--scope", plugin.scope]
+        if plugin.scope == "project":
+            cmd += ["--project", str(project_root)]
+
+        print(f"plugin  {plugin.name}: {' '.join(cmd)}")
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            print(
+                f"error   plugin {plugin.name} exited with code {result.returncode}",
+                file=sys.stderr,
+            )
+            errors += 1
+
+    return 1 if errors else 0
+
+
 def run_health_check(source_root: Path, project_root: Path) -> None:
     """Run health-check.sh after install to surface any environment issues."""
     health_check = source_root / "scripts" / "health-check.sh"
@@ -2323,6 +2436,7 @@ def install_from_conf(
             pull_repo(profile_root, "profile")
         if pull_cached_skills:
             _pull_skill_repos(conf.skills, cache_root)
+            _pull_plugin_repos(conf.plugins, cache_root)
 
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
@@ -2366,6 +2480,10 @@ def install_from_conf(
 
     rc = setup_external_skills(operation, conf.skills, project_root, cache_root)
 
+    plugin_rc = setup_plugins(operation, conf.plugins, project_root, cache_root)
+    if plugin_rc != 0:
+        rc = plugin_rc
+
     # Clean up machine.toml and registry entry after uninstall.
     # setup(UNINSTALL) already removes tamago.conf and machine.env;
     # machine.toml and the registry entry are our responsibility here.
@@ -2381,6 +2499,232 @@ def install_from_conf(
         run_health_check(source_root, project_root)
 
     return rc
+
+
+# ---------------------------------------------------------------------------
+# Global conf install  (two-tier refactor Step 1)
+# ---------------------------------------------------------------------------
+
+def _write_global_conf_template(path: Path) -> None:
+    """Write a commented-out starter template to ~/.tamago/tamago.conf if it does not exist.
+
+    The template is a no-op until the user uncomments entries — existing installs are
+    therefore unaffected on upgrade.
+    """
+    template = (
+        "# ~/.tamago/tamago.conf — global tamago configuration\n"
+        "# Items declared here are installed globally (→ ~/.claude/ and ~/.opencode/).\n"
+        "# Run 'tamago install-global' after editing this file.\n"
+        "#\n"
+        "# ── Skills ──────────────────────────────────────────────────────────────────\n"
+        "# Uncomment to install built-in tamago skills globally.\n"
+        "# [[skills]]\n"
+        "# name   = \"hatch\"\n"
+        "# source = \"tamago\"\n"
+        "#\n"
+        "# ── Plugins ─────────────────────────────────────────────────────────────────\n"
+        "# [[plugins]]\n"
+        "# name  = \"nagori\"\n"
+        "# repo  = \"https://github.com/HammerMei/nagori\"\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(template)
+    print(f"created {path}  (starter template — edit and re-run 'tamago install-global')")
+
+
+def install_global_from_conf(
+    conf_path: Path,
+    operation: Operation,
+    source_root: Path,
+    pull_cached_skills: bool = False,
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+) -> int:
+    """Install/uninstall agents, skills, and plugins declared in ~/.tamago/tamago.conf.
+
+    Tamago infra (hooks, git hooks, local bin, global settings patch) runs
+    unconditionally on every call regardless of conf contents.
+
+    If conf_path does not exist on INSTALL, a commented-out starter template is
+    written there so the user has a ready-made starting point — but no conf-driven
+    items are installed (the template is entirely commented out).
+
+    All agents/skills/plugins declared in the global conf are installed globally
+    (→ ~/.claude/ and ~/.opencode/); the ``scope`` field is ignored here because
+    tier determines scope in the two-tier architecture.
+    """
+    errors: list[str] = []
+
+    # ── Tamago infra (always unconditional) ───────────────────────────────────
+    for step in (
+        lambda: patch_global_settings(operation, source_root),
+        lambda: patch_opencode_global_settings(operation, source_root),
+        lambda: setup_shell_env(operation, source_root),
+        lambda: setup_git_hooks(operation, source_root),
+        lambda: setup_local_bin(operation, source_root),
+        lambda: _setup_bootstrap_skill(operation, source_root),
+    ):
+        try:
+            step()
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
+
+    # ── Generate starter template if no global conf exists ────────────────────
+    if operation == Operation.INSTALL and not conf_path.exists():
+        try:
+            _write_global_conf_template(conf_path)
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
+        # Template is all comments — nothing to install from it yet.
+        return 1 if errors else 0
+
+    # ── Load global conf ──────────────────────────────────────────────────────
+    conf = load_tamago_conf(conf_path)
+    if conf is None:
+        if conf_path.exists():
+            # File exists but is unparseable
+            msg = f"error   could not parse global tamago.conf: {conf_path}"
+            print(msg, file=sys.stderr)
+            errors.append(msg)
+        # Missing file: infra already ran, nothing more to do.
+        return 1 if errors else 0
+
+    # Guard: only one [[profiles]] entry supported
+    if len(conf.profiles) > 1:
+        print(
+            f"error   global tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
+            f"only one is supported in this version",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ── Resolve profile ───────────────────────────────────────────────────────
+    profile_root: Path | None = None
+
+    if operation == Operation.UNINSTALL:
+        machine_data = load_machine_toml(GLOBAL_MACHINE_TOML_PATH)
+        if machine_data is not None:
+            for path_str in machine_data.profiles.values():
+                candidate = Path(path_str)
+                if candidate.is_dir():
+                    profile_root = candidate
+                    print(f"info    using profile from global machine.toml: {profile_root}")
+                    break
+
+    if profile_root is None and conf.profiles:
+        p = conf.profiles[0]
+        try:
+            profile_root = resolve_profile_root(
+                source_root,
+                profile_dir=None,
+                profile_repo=p.repo,
+                profile_name=p.name,
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
+
+    # ── Pull repos (on 'tamago update' only) ──────────────────────────────────
+    if operation == Operation.INSTALL and pull_cached_skills:
+        _pull_skill_repos(conf.skills, cache_root)
+        _pull_plugin_repos(conf.plugins, cache_root)
+
+    # ── Derive install params ─────────────────────────────────────────────────
+    # In the global conf, ALL items are global-scoped (tier determines scope).
+    disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
+    all_agents: set[str] = {a.name for a in conf.agents if not a.disable}
+    disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
+    tts_enabled = True
+    for a in conf.agents:
+        if a.source == "profile":
+            tts_enabled = a.tts
+            break
+    agent_name: str | None = next(
+        (a.name for a in conf.agents if not a.disable), None
+    )
+
+    # CONVENTIONAL_ROOT (~/.tamago) is used as stand-in project_root.
+    # setup_agents/setup_skills route to ~/.claude/ whenever global_agents/has_global_agent
+    # is set, so they never write under ~/.tamago/.claude/ in practice.
+    global_root = CONVENTIONAL_ROOT
+
+    # ── Agents ────────────────────────────────────────────────────────────────
+    try:
+        setup_agents(
+            operation, source_root, global_root, profile_root,
+            tts_enabled=tts_enabled,
+            disabled_agents=disabled_agents,
+            global_agents=all_agents,
+        )
+    except Exception as e:
+        print(e, file=sys.stderr)
+        errors.append(str(e))
+
+    # ── Skills (built-in + profile) ───────────────────────────────────────────
+    try:
+        setup_skills(
+            operation, source_root, global_root, profile_root,
+            disabled_skills=disabled_skills,
+            project_scoped_skills=set(),  # no project-scoped skills from global conf
+            has_global_agent=True,         # all skills go to ~/.claude/skills/
+        )
+    except Exception as e:
+        print(e, file=sys.stderr)
+        errors.append(str(e))
+
+    # ── Agent settings (default-agent pointer + profile overrides) ────────────
+    try:
+        setup_settings(
+            operation, source_root, global_root, profile_root,
+            install_globally=True,
+            agent_name=agent_name,
+        )
+    except Exception as e:
+        print(e, file=sys.stderr)
+        errors.append(str(e))
+
+    # ── Machine.env ───────────────────────────────────────────────────────────
+    global_machine_env = CONVENTIONAL_ROOT / MACHINE_ENV_NAME
+    if operation == Operation.INSTALL:
+        try:
+            write_machine_env(
+                global_machine_env, profile_root, agent_name,
+                conf.memory_sync, tts_enabled,
+            )
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
+    elif operation == Operation.UNINSTALL:
+        try:
+            write_machine_env(global_machine_env, None, "")
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
+
+    # ── External skills (URL-sourced) ─────────────────────────────────────────
+    ext_rc = setup_external_skills(operation, conf.skills, global_root, cache_root)
+    if ext_rc != 0:
+        errors.append(f"external skills failed (rc={ext_rc})")
+
+    # ── Plugins ───────────────────────────────────────────────────────────────
+    plugin_rc = setup_plugins(operation, conf.plugins, global_root, cache_root)
+    if plugin_rc != 0:
+        errors.append(f"plugins failed (rc={plugin_rc})")
+
+    # ── Write/remove global machine.toml ──────────────────────────────────────
+    if operation == Operation.INSTALL:
+        _write_install_machine_toml(GLOBAL_MACHINE_TOML_PATH, conf, profile_root, cache_root)
+    elif operation == Operation.UNINSTALL:
+        if GLOBAL_MACHINE_TOML_PATH.exists():
+            GLOBAL_MACHINE_TOML_PATH.unlink()
+            print(f"removed {GLOBAL_MACHINE_TOML_PATH}")
+
+    # ── Health check ──────────────────────────────────────────────────────────
+    if operation == Operation.INSTALL:
+        run_health_check(source_root, global_root)
+
+    return 1 if errors else 0
 
 
 # ---------------------------------------------------------------------------
@@ -2637,10 +2981,15 @@ def main() -> int:
         return 0
 
     if args.command == "install-global":
-        return setup_global(Operation.INSTALL, source_root)
+        return install_global_from_conf(
+            GLOBAL_CONF_PATH, Operation.INSTALL, source_root,
+            pull_cached_skills=was_update,
+        )
 
     if args.command == "uninstall-global":
-        return setup_global(Operation.UNINSTALL, source_root)
+        return install_global_from_conf(
+            GLOBAL_CONF_PATH, Operation.UNINSTALL, source_root,
+        )
 
     # install/uninstall route through install_from_conf via the TOML tamago.conf.
     # Auto-detect .tamago/tamago.conf in CWD; --config overrides the detected path.

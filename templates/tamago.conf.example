@@ -72,6 +72,35 @@ memory = true
 # source = "https://github.com/you/my-tool-skill.git"
 # scope  = "project"
 
+# ── Plugins ────────────────────────────────────────────────────────────────────
+# Third-party tools that tamago provisions by calling their install.py.
+# Plugin contract: <repo>/install.py {install,uninstall} --scope {global|project}
+#                  [--project <project-dir>]   (only passed when scope = "project")
+#
+# name    — plugin identifier (for display only)
+# repo    — path to the plugin repo (required, ~ is expanded)
+# scope   — "global"  → no --project passed, hooks/skills installed globally
+#            "project" → --project <current project> is passed              [default: global]
+# disable — set to true to skip installation                                [default: false]
+
+# Example: provision nagori from a git URL (tamago clones to ~/.tamago/repo-cache/)
+# [[plugins]]
+# name  = "nagori"
+# repo  = "https://github.com/you/nagori.git"
+# scope = "global"
+
+# Example: provision nagori from a local checkout
+# [[plugins]]
+# name  = "nagori"
+# repo  = "~/workspace/nagori"
+# scope = "global"
+
+# Example: provision a plugin for this project only
+# [[plugins]]
+# name  = "my-tool"
+# repo  = "https://github.com/you/my-tool.git"
+# scope = "project"
+
 # ── Settings ───────────────────────────────────────────────────────────────────
 # memory_sync — enable git-based memory sync across machines [default: true]
 #               Set to false for offline/air-gapped setups.
