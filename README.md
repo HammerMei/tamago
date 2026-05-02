@@ -26,7 +26,7 @@ It provides the mechanics — **you bring the soul**.
 | `templates/` | Profile scaffolding templates used by the hatch skill |
 | `scripts/memory-sync.sh` | Git-backed memory sync across machines |
 | `scripts/health-check.sh` | Post-setup environment health check |
-| `setup.py` | Symlink installer (`install-global`, `install --profile`) |
+| `setup.py` | Symlink installer (`tamago install`, `tamago install-global`) |
 | `git-hooks/post-merge` | Auto-regenerates agent files after `git pull` on tamago |
 | `docs/tamago-agent-base.md` | Common mechanics merged into every agent system prompt |
 | `settings/claude/settings.json` | Hooks + permissions (no agent name) |
@@ -47,7 +47,7 @@ templates/                        agents/memory/ (git synced)
 .tamago/machine.env → profile     secrets/
 ```
 
-`setup.py install --profile` merges tamago's common mechanics (`docs/tamago-agent-base.md`)
+`tamago install` merges tamago's common mechanics (`docs/tamago-agent-base.md`)
 with your persona file (`agents/<name>.persona.md`) into a single generated agent `.md`.  
 Memory sync runs on every session — pulling before your prompt, pushing after your reply.  
 The profile repo can live anywhere: GitHub, a private bare repo on your home server, whatever keeps your data yours.
@@ -59,21 +59,99 @@ The profile repo can live anywhere: GitHub, a private bare repo on your home ser
 # 1. Clone tamago
 git clone https://github.com/HammerMei/tamago ~/.tamago
 
-# 2. Install global hooks + settings
-python3 ~/.tamago/setup.py install-global
+# 2. Add ~/.tamago/bin to PATH (or use python3 ~/.tamago/setup.py directly)
+export PATH="$HOME/.tamago/bin:$PATH"
 
-# 3. Clone (or create) your profile repo
-git clone <your-profile-remote> ~/.tamago/your-profile
-# — OR — hatch a brand-new one (see below)
+# 3. Write ~/.tamago/tamago.conf  (global tier — profile + global plugins)
+cat > ~/.tamago/tamago.conf << 'EOF'
+[[profiles]]
+name = "your-agent"
+# repo = "git@github.com:you/your-profile.git"   # optional: explicit profile path
 
-# 4. Install into a project
+# [[plugins]]
+# name = "nagori"
+# repo = "https://github.com/HammerMei/nagori"
+EOF
+
+# 4. Install global hooks, settings, and plugins
+tamago install-global
+
+# 5. Write <project>/.tamago/tamago.conf  (project tier — agents + project skills)
 cd ~/workspace/your-project
-python3 ~/.tamago/setup.py install --profile-dir ~/.tamago/your-profile
-# Shorthand: --profile-name your  (resolves to ~/.tamago/your-profile)
+mkdir -p .tamago
+cat > .tamago/tamago.conf << 'EOF'
+[[agents]]
+name   = "your-agent"
+source = "profile"
+tts    = true
+memory = true
 
-# 5. Run the health check to verify everything is wired up
+[settings]
+memory_sync = true
+EOF
+
+# 6. Install into the project
+tamago install
+
+# 7. Run the health check to verify everything is wired up
 bash ~/.tamago/scripts/health-check.sh
 ```
+
+
+## Configuration
+
+Tamago uses a two-tier `tamago.conf` (TOML format):
+
+### Global tier — `~/.tamago/tamago.conf`
+
+Installed by `tamago install-global`. Controls what's available across all machines and projects.
+
+```toml
+# Profile to use (inheritable by project confs)
+[[profiles]]
+name = "hammer.mei"
+# repo = "/path/to/profile"   # optional; defaults to ~/.tamago/<name>-profile
+
+# Global plugins (e.g. session memory, integrations)
+[[plugins]]
+name  = "nagori"
+repo  = "https://github.com/HammerMei/nagori"
+```
+
+### Project tier — `<project>/.tamago/tamago.conf`
+
+Installed by `tamago install` from inside a project directory. Controls what's installed for this project only.
+
+```toml
+# Profile is inherited from ~/.tamago/tamago.conf if omitted here
+
+[[agents]]
+name   = "hammer.mei"   # persona file in profile repo
+source = "profile"
+tts    = true
+memory = true
+
+# URL-sourced external skills (project-scoped)
+[[skills]]
+name   = "daily-briefing"
+source = "user@host:~/skills.git"
+path   = "daily-briefing"
+
+[settings]
+memory_sync = true   # default: true
+```
+
+### Scope rules
+
+| Item | Where it goes |
+|------|--------------|
+| Tamago built-in skills (`hatch`, `text-to-speech`) | Always `~/.claude/skills/` |
+| Profile skills | Project conf → project `.claude/skills/`; global conf → `~/.claude/skills/` |
+| Agents declared in project conf | `<project>/.claude/agents/` |
+| Agents declared in global conf | `~/.claude/agents/` |
+| Plugins | Run their own `install.py` with matching scope |
+
+The `scope` field is no longer used — the tier determines the scope.
 
 
 ## Hatch a new agent 🐣
@@ -105,7 +183,7 @@ python3 .claude/skills/hatch/hatch.py \
   --profile-dir ~/.tamago/xiao.mei-profile \
   --tts --tts-voice "Meijia" \
   --skills "text-to-speech" \
-  --install     # runs setup.py install --profile-dir automatically
+  --install     # runs tamago install automatically
 ```
 
 After hatching, **restart Claude** to activate the new agent.
@@ -125,7 +203,7 @@ After hatching, **restart Claude** to activate the new agent.
 | `--tts` | Include TTS instructions in the persona |
 | `--tts-voice` | TTS voice name (default: `Meijia`) |
 | `--skills` | Comma-separated skill names to include |
-| `--install` | Auto-run `setup.py install --profile` after creation |
+| `--install` | Auto-run `tamago install` after creation |
 | `--dry-run` | Preview what would be created without writing files |
 
 
@@ -177,7 +255,7 @@ maxTurns: 12
 ... identity, language style, TTS config, etc. ...
 ```
 
-`setup.py install --profile` merges this with `docs/tamago-agent-base.md` (memory mechanics)
+`tamago install` merges this with `docs/tamago-agent-base.md` (memory mechanics)
 into the generated `.claude/agents/<name>.md`. **Edit only the persona file, never the generated file.**
 
 
@@ -192,7 +270,8 @@ Memory is git-backed and syncs automatically via Claude Code hooks:
 | `Stop` | Commit changed memory files → pull → push |
 
 All memory lives in `<profile-repo>/agents/memory/<agent-name>/`.  
-Set `LAOMEI_MEMORY_SYNC=0` to disable sync (offline / emergency use).
+Set `LAOMEI_MEMORY_SYNC=0` to disable sync (offline / emergency use).  
+Per-project control: set `memory_sync = false` in `[settings]` of your project `tamago.conf`.
 
 
 ## Available skills
@@ -204,9 +283,11 @@ Set `LAOMEI_MEMORY_SYNC=0` to disable sync (offline / emergency use).
 | `text-to-speech` | macOS TTS with background queue, voice selection, rate control |
 | `hatch` | Guided creation of a new agent profile (this skill) |
 
+Built-in skills are always installed to `~/.claude/skills/` — accessible from every project without any conf entry.
+
 ### Custom skills (your profile repo)
 
-Drop a skill directory into `<profile-repo>/skills/<skill-name>/` — it gets symlinked alongside the built-in skills when you run `setup.py install --profile`.
+Drop a skill directory into `<profile-repo>/skills/<skill-name>/` — it gets symlinked when you run `tamago install`.
 
 If a profile skill has the **same name** as a built-in tamago skill, the profile version wins (shadow override).
 
@@ -226,8 +307,6 @@ skills:
   - my-custom-tool
 ```
 
-Add a skill to your persona's frontmatter `skills:` list to activate it.
-
 
 ## Regenerating agent files
 
@@ -235,7 +314,7 @@ After editing `<name>.persona.md` or pulling tamago updates:
 
 ```bash
 cd ~/workspace/your-project
-python3 ~/.tamago/setup.py install --profile-name your
+tamago install
 ```
 
 The `git-hooks/post-merge` hook (installed by `install-global`) does this automatically
@@ -250,7 +329,6 @@ Bugs, ideas, and pull requests are welcome! See [CONTRIBUTING.md](CONTRIBUTING.m
 ## Roadmap
 
 Planned features and ideas live in [ROADMAP.md](ROADMAP.md).
-The big one: a `tamago.conf` (TOML) declarative installer — see [docs/design/v2-design.md](docs/design/v2-design.md).
 
 ## License
 
