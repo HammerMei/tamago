@@ -3020,6 +3020,46 @@ scope = "project"
             self.assertEqual(result, 0)
             mock_ext.assert_called_once()
 
+    def test_external_skills_called_with_install_globally_false(self):
+        """install_from_conf passes install_globally=False to setup_external_skills (project conf)."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text("")
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0) as mock_ext,
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+            ):
+                sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL,
+                    Path(td) / "source", Path(td) / "project",
+                )
+
+            _, kwargs = mock_ext.call_args
+            self.assertFalse(kwargs.get("install_globally", True))
+
+    def test_plugins_called_with_install_globally_false(self):
+        """install_from_conf passes install_globally=False to setup_plugins (project conf)."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text('[[plugins]]\nname = "nagori"\nrepo = "/tmp/fake"\n')
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0) as mock_plugins,
+            ):
+                sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL,
+                    Path(td) / "source", Path(td) / "project",
+                )
+
+            _, kwargs = mock_plugins.call_args
+            self.assertFalse(kwargs.get("install_globally", True))
+
     def test_pull_cached_false_does_not_call_pull_skill_repos(self):
         """pull_cached_skills=False → _pull_skill_repos is NOT called."""
         with tempfile.TemporaryDirectory() as td:
@@ -5428,6 +5468,34 @@ class InstallGlobalFromConfTests(unittest.TestCase):
 
         patches["setup_agents"].assert_called_once()
         _, kwargs = patches["setup_agents"].call_args
+        self.assertTrue(kwargs.get("install_globally", False))
+        self.assertEqual(rc, 0)
+
+    def test_conf_with_ext_skill_passes_install_globally_true(self):
+        """setup_external_skills is called with install_globally=True from the global conf path."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text(
+                '[[skills]]\nname = "my-skill"\nsource = "https://example.com/skill.git"\n'
+            )
+
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        patches["setup_external_skills"].assert_called_once()
+        _, kwargs = patches["setup_external_skills"].call_args
+        self.assertTrue(kwargs.get("install_globally", False))
+        self.assertEqual(rc, 0)
+
+    def test_conf_with_plugin_passes_install_globally_true(self):
+        """setup_plugins is called with install_globally=True from the global conf path."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "tamago.conf"
+            conf.write_text('[[plugins]]\nname = "nagori"\nrepo = "/tmp/fake-repo"\n')
+
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td))
+
+        patches["setup_plugins"].assert_called_once()
+        _, kwargs = patches["setup_plugins"].call_args
         self.assertTrue(kwargs.get("install_globally", False))
         self.assertEqual(rc, 0)
 
