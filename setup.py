@@ -271,7 +271,6 @@ class ProfileEntry:
 class AgentEntry:
     name: str
     source: str = "tamago"
-    scope: str = "project"
     tts: bool = True
     memory: bool = True
     disable: bool = False
@@ -281,7 +280,6 @@ class AgentEntry:
 class SkillEntry:
     name: str
     source: str = "tamago"
-    scope: str = "global"
     path: str | None = None
     disable: bool = False
 
@@ -290,7 +288,6 @@ class SkillEntry:
 class PluginEntry:
     name: str
     repo: str                 # required: path to plugin repo (expanduser applied at parse time)
-    scope: str = "global"     # "global" | "project"
     disable: bool = False
 
 
@@ -333,7 +330,6 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             AgentEntry(
                 name=a["name"],
                 source=a.get("source", "tamago"),
-                scope=a.get("scope", "project"),
                 tts=a.get("tts", True),
                 memory=a.get("memory", True),
                 disable=a.get("disable", False),
@@ -345,7 +341,6 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             SkillEntry(
                 name=s["name"],
                 source=os.path.expanduser(s.get("source", "tamago")),
-                scope=s.get("scope", "global"),
                 path=s.get("path"),
                 disable=s.get("disable", False),
             )
@@ -356,7 +351,6 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             PluginEntry(
                 name=pl["name"],
                 repo=os.path.expanduser(pl["repo"]),
-                scope=pl.get("scope", "global"),
                 disable=pl.get("disable", False),
             )
             for pl in raw.get("plugins", [])
@@ -1813,11 +1807,14 @@ def setup_external_skills(
     conf_skills: list["SkillEntry"],
     project_root: Path,
     cache_root: Path = DEFAULT_CACHE_ROOT,
+    install_globally: bool = False,
 ) -> int:
     """Symlink (or remove) external (URL-sourced) skills.
 
     Processes only SkillEntry objects where source is a git URL (not
-    "tamago" or "profile").  Supports both project and global scope.
+    "tamago" or "profile").  When install_globally=True, symlinks go into
+    ~/.claude/skills/ and ~/.opencode/skills/; otherwise they go under
+    project_root/.claude/skills/ and project_root/.opencode/skills/.
     Returns 0 on success, 1 if any skill fails to clone, resolve, or link.
     """
     errors = 0
@@ -1833,11 +1830,11 @@ def setup_external_skills(
         if url in ("tamago", "profile"):
             continue
 
-        # Route by scope — mirrors the logic in setup_skills
-        if skill.scope == "global":
+        # Route by install_globally — mirrors the logic in setup_skills
+        if install_globally:
             skills_roots = (home_claude_skills, home_opencode_skills)
             stale_roots  = (project_claude_skills, project_opencode_skills)
-        else:  # project scope (default)
+        else:
             skills_roots = (project_claude_skills, project_opencode_skills)
             stale_roots  = (home_claude_skills, home_opencode_skills)
 
@@ -1943,12 +1940,13 @@ def setup_plugins(
     plugins: list["PluginEntry"],
     project_root: Path,
     cache_root: Path = DEFAULT_CACHE_ROOT,
+    install_globally: bool = False,
 ) -> int:
     """Run each plugin's install.py with the requested operation and scope.
 
     Plugin contract:
       <plugin.repo>/install.py {install,uninstall} --scope {global|project}
-                               [--project <project_root>]   # only when scope=project
+                               [--project <project_root>]   # only when install_globally=False
 
     plugin.repo may be either:
       - A local path (absolute or starting with ~, already expanduser'd at parse time)
@@ -1988,9 +1986,10 @@ def setup_plugins(
             )
             continue
 
+        scope_str = "global" if install_globally else "project"
         cmd = [sys.executable, str(install_script), operation.value,
-               "--scope", plugin.scope]
-        if plugin.scope == "project":
+               "--scope", scope_str]
+        if not install_globally:
             cmd += ["--project", str(project_root)]
 
         print(f"plugin  {plugin.name}: {' '.join(cmd)}")
@@ -2512,23 +2511,6 @@ def install_from_conf(
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
 
-    # Two-tier model: everything in the project conf is always project-scoped.
-    # scope="global" no longer has any effect in the project conf — warn and ignore.
-    for _a in conf.agents:
-        if not _a.disable and _a.scope == "global":
-            print(
-                f"warning scope=\"global\" on agent '{_a.name}' in project tamago.conf is "
-                f"ignored — declare it in ~/.tamago/tamago.conf instead",
-                file=sys.stderr,
-            )
-    for _s in conf.skills:
-        if not _s.disable and _s.source in ("tamago", "profile") and _s.scope == "global":
-            print(
-                f"warning scope=\"global\" on skill '{_s.name}' in project tamago.conf is "
-                f"ignored — declare it in ~/.tamago/tamago.conf instead",
-                file=sys.stderr,
-            )
-
     # Agent name for default-agent pointer: first non-disabled agent in conf.
     agent_name: str | None = next(
         (a.name for a in conf.agents if not a.disable),
@@ -2559,9 +2541,11 @@ def install_from_conf(
         # 'tamago update --all' can find this project.
         add_project_to_registry(project_root, registry_path)
 
-    rc = setup_external_skills(operation, conf.skills, project_root, cache_root)
+    rc = setup_external_skills(operation, conf.skills, project_root, cache_root,
+                               install_globally=False)
 
-    plugin_rc = setup_plugins(operation, conf.plugins, project_root, cache_root)
+    plugin_rc = setup_plugins(operation, conf.plugins, project_root, cache_root,
+                              install_globally=False)
     if plugin_rc != 0:
         rc = plugin_rc
 
@@ -2782,12 +2766,14 @@ def install_global_from_conf(
             errors.append(str(e))
 
     # ── External skills (URL-sourced) ─────────────────────────────────────────
-    ext_rc = setup_external_skills(operation, conf.skills, global_root, cache_root)
+    ext_rc = setup_external_skills(operation, conf.skills, global_root, cache_root,
+                                   install_globally=True)
     if ext_rc != 0:
         errors.append(f"external skills failed (rc={ext_rc})")
 
     # ── Plugins ───────────────────────────────────────────────────────────────
-    plugin_rc = setup_plugins(operation, conf.plugins, global_root, cache_root)
+    plugin_rc = setup_plugins(operation, conf.plugins, global_root, cache_root,
+                              install_globally=True)
     if plugin_rc != 0:
         errors.append(f"plugins failed (rc={plugin_rc})")
 

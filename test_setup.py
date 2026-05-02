@@ -789,7 +789,6 @@ scope = "project"
             self.assertEqual(conf.profiles[0].name, "hammer.mei")
             self.assertEqual(len(conf.skills), 1)
             self.assertEqual(conf.skills[0].name, "text-to-speech")
-            self.assertEqual(conf.skills[0].scope, "project")
 
     def test_skill_source_tilde_expanded(self):
         """~/path in [[skills]] source= is expanded to an absolute path at parse time."""
@@ -2529,8 +2528,8 @@ class SkillRepoCacheTests(unittest.TestCase):
 class SetupExternalSkillsTests(unittest.TestCase):
     """Tests for setup_external_skills."""
 
-    def _make_skill(self, name, source, scope="project", path=None):
-        return sm.SkillEntry(name=name, source=source, scope=scope, path=path)
+    def _make_skill(self, name, source, path=None):
+        return sm.SkillEntry(name=name, source=source, path=path)
 
     def test_tamago_source_skipped(self):
         """source='tamago' entries are ignored — no symlinks, no clones."""
@@ -2560,20 +2559,18 @@ class SetupExternalSkillsTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             mock_clone.assert_not_called()
 
-    def test_global_scope_installs_to_home_claude(self):
-        """scope='global' installs into ~/.claude/skills/ and ~/.opencode/skills/."""
+    def test_install_globally_installs_to_home_claude(self):
+        """install_globally=True installs into ~/.claude/skills/ and ~/.opencode/skills/."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             skill_dir = Path(td) / "cloned-skill-dir"
             skill_dir.mkdir()
-            skill = self._make_skill(
-                "my-skill", "https://example.com/skill.git", scope="global"
-            )
+            skill = self._make_skill("my-skill", "https://example.com/skill.git")
             with mock.patch.object(
                 sm, "_resolve_external_skill_dir", return_value=skill_dir
             ):
                 rc = sm.setup_external_skills(
-                    sm.Operation.INSTALL, [skill], project
+                    sm.Operation.INSTALL, [skill], project, install_globally=True
                 )
             self.assertEqual(rc, 0)
             # Must be installed globally, not in the project dir
@@ -3960,11 +3957,11 @@ class GlobalAgentScopeTests(unittest.TestCase):
             self.assertTrue(home_mem.is_symlink())
             self.assertFalse(project_mem.exists())
 
-    def test_install_from_conf_scope_global_agent_warns_and_ignored(self):
-        """Two-tier model: scope='global' in project conf is ignored; global_agents is always empty.
+    def test_install_from_conf_scope_global_agent_is_silently_ignored(self):
+        """Two-tier model: scope='global' in project conf is silently ignored.
 
-        A deprecation warning is emitted to stderr so users know to move the entry
-        to ~/.tamago/tamago.conf instead.
+        The scope field is no longer parsed from tamago.conf; install_globally is
+        always False for project-level installs regardless of what the TOML says.
         """
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
@@ -3980,12 +3977,9 @@ class GlobalAgentScopeTests(unittest.TestCase):
                 captured["install_globally"] = kwargs.get("install_globally")
                 return 0
 
-            import io
-            stderr_buf = io.StringIO()
             with (
                 mock.patch.object(sm, "setup", side_effect=fake_setup),
                 mock.patch.object(sm, "pull_repo"),
-                mock.patch("sys.stderr", stderr_buf),
             ):
                 sm.install_from_conf(
                     conf_path,
@@ -3997,10 +3991,6 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             # install_globally must be False — project conf is always project-scoped
             self.assertFalse(captured.get("install_globally", False))
-            # warning must be emitted for the deprecated scope="global"
-            self.assertIn("scope=\"global\"", stderr_buf.getvalue())
-            self.assertIn("hammer.mei", stderr_buf.getvalue())
-            self.assertIn("~/.tamago/tamago.conf", stderr_buf.getvalue())
 
     def test_disabled_agent_is_in_disabled_agents(self):
         """A disabled agent (disable=true) appears in disabled_agents regardless of scope."""
@@ -4657,7 +4647,6 @@ class DisableSkillTests(unittest.TestCase):
             skill = sm.SkillEntry(
                 name="my-skill",
                 source="https://example.com/my-skill.git",
-                scope="project",
                 disable=True,
             )
             out = io.StringIO()
@@ -4682,7 +4671,6 @@ class DisableSkillTests(unittest.TestCase):
             skill = sm.SkillEntry(
                 name="my-skill",
                 source="https://example.com/my-skill.git",
-                scope="project",
                 disable=True,
             )
             with mock.patch.object(sm, "_resolve_external_skill_dir") as mock_resolve:
@@ -6745,11 +6733,11 @@ scope = "project"
             plugin = conf.plugins[0]
             self.assertEqual(plugin.name, "nagori")
             self.assertEqual(plugin.repo, "/opt/nagori")
-            self.assertEqual(plugin.scope, "project")
+            # scope field is silently ignored in load_tamago_conf (two-tier model)
             self.assertFalse(plugin.disable)
 
     def test_plugin_defaults(self):
-        """scope defaults to 'global' and disable defaults to False."""
+        """disable defaults to False."""
         with tempfile.TemporaryDirectory() as td:
             p = self._write(Path(td), """
 [[plugins]]
@@ -6759,7 +6747,6 @@ repo = "/some/path"
             conf = sm.load_tamago_conf(p)
             self.assertIsNotNone(conf)
             plugin = conf.plugins[0]
-            self.assertEqual(plugin.scope, "global")
             self.assertFalse(plugin.disable)
 
     def test_plugin_disable_true(self):
@@ -6867,17 +6854,18 @@ class TestSetupPlugins(unittest.TestCase):
         return repo
 
     def test_calls_install_script_on_install(self):
-        """setup_plugins calls <repo>/install.py install --scope global."""
+        """setup_plugins calls <repo>/install.py install --scope global when install_globally=True."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             repo = self._make_plugin_repo(root, "myplugin")
             project = root / "project"
             project.mkdir()
 
-            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="global")
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
             with mock.patch("subprocess.run") as mock_run:
                 mock_run.return_value = mock.Mock(returncode=0)
-                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
+                rc = sm.setup_plugins(sm.Operation.INSTALL, [plugin], project,
+                                      install_globally=True)
 
             self.assertEqual(rc, 0)
             mock_run.assert_called_once()
@@ -6885,18 +6873,18 @@ class TestSetupPlugins(unittest.TestCase):
             self.assertIn("install", cmd)
             self.assertIn("--scope", cmd)
             self.assertIn("global", cmd)
-            # project flag must NOT be passed for global scope
+            # project flag must NOT be passed when install_globally=True
             self.assertNotIn("--project", cmd)
 
     def test_calls_install_script_on_uninstall(self):
-        """setup_plugins calls <repo>/install.py uninstall --scope global."""
+        """setup_plugins calls <repo>/install.py uninstall."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             repo = self._make_plugin_repo(root, "myplugin")
             project = root / "project"
             project.mkdir()
 
-            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="global")
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
             with mock.patch("subprocess.run") as mock_run:
                 mock_run.return_value = mock.Mock(returncode=0)
                 rc = sm.setup_plugins(sm.Operation.UNINSTALL, [plugin], project)
@@ -6905,15 +6893,15 @@ class TestSetupPlugins(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertIn("uninstall", cmd)
 
-    def test_project_scope_passes_project_flag(self):
-        """scope='project' passes --project <project_root> to install.py."""
+    def test_install_globally_false_passes_project_flag(self):
+        """install_globally=False (default) passes --scope project --project <root> to install.py."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             repo = self._make_plugin_repo(root, "myplugin")
             project = root / "project"
             project.mkdir()
 
-            plugin = sm.PluginEntry(name="myplugin", repo=str(repo), scope="project")
+            plugin = sm.PluginEntry(name="myplugin", repo=str(repo))
             with mock.patch("subprocess.run") as mock_run:
                 mock_run.return_value = mock.Mock(returncode=0)
                 sm.setup_plugins(sm.Operation.INSTALL, [plugin], project)
@@ -7053,7 +7041,7 @@ class TestSetupPlugins(unittest.TestCase):
             project.mkdir()
 
             url = "https://github.com/you/nagori.git"
-            plugin = sm.PluginEntry(name="nagori", repo=url, scope="global")
+            plugin = sm.PluginEntry(name="nagori", repo=url)
 
             with (
                 mock.patch.object(sm, "_skill_repo_cache_dir", return_value=fake_cache),
@@ -7264,11 +7252,10 @@ repo = "/opt/nagori"
 [[plugins]]
 name  = "nagori"
 repo  = "/opt/nagori"
-scope = "project"
 """)
             captured_plugins = []
 
-            def capture_plugins(op, plugins, project_root, cache_root=None):
+            def capture_plugins(op, plugins, project_root, cache_root=None, **kwargs):
                 captured_plugins.extend(plugins)
                 return 0
 
@@ -7287,7 +7274,6 @@ scope = "project"
 
             self.assertEqual(len(captured_plugins), 1)
             self.assertEqual(captured_plugins[0].name, "nagori")
-            self.assertEqual(captured_plugins[0].scope, "project")
 
     def test_pull_cached_true_pulls_plugin_repos(self):
         """pull_cached_skills=True → _pull_plugin_repos is called for plugins too."""
