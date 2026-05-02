@@ -939,6 +939,52 @@ class MachineEnvTests(unittest.TestCase):
             self.assertRegex(content, r"PROFILE_REPO='[^']*'")
             self.assertRegex(content, r"AGENT_NAME='[^']*'")
 
+    def test_writes_agent_names_for_multi_agent(self):
+        """AGENT_NAMES line written when agent_names list is provided."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            sm.write_machine_env(
+                env_path, profile_repo, "hammer.mei",
+                agent_names=["hammer.mei", "wave.bro"],
+            )
+
+            content = env_path.read_text()
+            self.assertIn("AGENT_NAMES=", content)
+            self.assertIn("hammer.mei wave.bro", content)
+            # Legacy AGENT_NAME still present (first agent)
+            self.assertIn("AGENT_NAME='hammer.mei'", content)
+
+    def test_agent_names_falls_back_to_agent_name_when_not_provided(self):
+        """AGENT_NAMES falls back to single AGENT_NAME when agent_names not given."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            sm.write_machine_env(env_path, profile_repo, "hammer.mei")
+
+            content = env_path.read_text()
+            # AGENT_NAMES should equal the single agent name
+            self.assertIn("AGENT_NAMES='hammer.mei'", content)
+
+    def test_agent_names_single_element_list(self):
+        """Single-element agent_names list produces AGENT_NAMES with one name."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            sm.write_machine_env(
+                env_path, profile_repo, "hammer.mei",
+                agent_names=["hammer.mei"],
+            )
+
+            content = env_path.read_text()
+            self.assertIn("AGENT_NAMES='hammer.mei'", content)
+
 
 class GlobalMachineEnvTests(unittest.TestCase):
     """Tests for ~/.tamago/machine.env written by setup() when install_globally=True."""
@@ -2012,6 +2058,10 @@ class InstallFromConfTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text("")  # empty = valid, no profiles
+            # Also provide an empty global conf so the real ~/.tamago/tamago.conf
+            # (which may have a [[profiles]] entry) doesn't bleed in as a fallback.
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
 
             with (
                 mock.patch.object(sm, "setup", return_value=0) as mock_setup,
@@ -2022,6 +2072,7 @@ class InstallFromConfTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             self.assertEqual(result, 0)
@@ -2167,6 +2218,8 @@ name = "edm_mei"
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text("")
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
 
             with (
                 mock.patch.object(sm, "setup", return_value=0),
@@ -2178,6 +2231,7 @@ name = "edm_mei"
                     sm.Operation.INSTALL,
                     source,
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             mock_pull.assert_called_once_with(source, "tamago")
@@ -3045,6 +3099,8 @@ scope = "project"
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text('[[plugins]]\nname = "nagori"\nrepo = "/tmp/fake"\n')
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
 
             with (
                 mock.patch.object(sm, "setup", return_value=0),
@@ -3055,6 +3111,7 @@ scope = "project"
                 sm.install_from_conf(
                     conf_path, sm.Operation.INSTALL,
                     Path(td) / "source", Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             _, kwargs = mock_plugins.call_args
@@ -4945,6 +5002,93 @@ class DisableAgentTests(unittest.TestCase):
 
             self.assertEqual(captured["disabled_agents"], {"code-reviewer"})
             self.assertEqual(captured["disabled_skills"], {"cmux-markdown"})
+
+    def test_install_from_conf_passes_agent_names_to_setup(self):
+        """install_from_conf collects all non-disabled agents and passes agent_names to setup."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            conf_path.write_text(
+                '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
+                '[[agents]]\nname = "wave.bro"\nsource = "profile"\n'
+                '[[agents]]\nname = "gone-agent"\nsource = "profile"\ndisable = true\n'
+            )
+            project_root = Path(td) / "project"
+            registry = Path(td) / "registry.json"
+
+            captured: dict = {}
+
+            def fake_setup(*args, **kwargs):
+                captured["agent_name"] = kwargs.get("agent_name")
+                captured["agent_names"] = kwargs.get("agent_names")
+                return 0
+
+            with (
+                mock.patch.object(sm, "setup", side_effect=fake_setup),
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    project_root,
+                    registry_path=registry,
+                )
+
+            # First non-disabled agent is the default-agent pointer
+            self.assertEqual(captured["agent_name"], "hammer.mei")
+            # All non-disabled agents are in the list
+            self.assertEqual(captured["agent_names"], ["hammer.mei", "wave.bro"])
+
+    def test_install_from_conf_machine_env_contains_all_agent_names(self):
+        """machine.env written by install_from_conf includes AGENT_NAMES for all non-disabled agents."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "tamago"
+            for subdir in ["skills", "agents", "settings/claude", "settings/opencode",
+                           "settings/opencode/plugins"]:
+                (source / subdir).mkdir(parents=True)
+            (source / "settings" / "claude" / "settings.json").write_text("{}")
+            (source / "settings" / "opencode" / "opencode.json").write_text("{}")
+            (source / "docs").mkdir()
+            (source / "docs" / "tamago-agent-base.md").write_text("base")
+
+            profile = root / "hammer.mei-profile"
+            (profile / "agents").mkdir(parents=True)
+            (profile / "settings" / "claude").mkdir(parents=True)
+            (profile / "settings" / "opencode").mkdir(parents=True)
+            (profile / "settings" / "claude" / "settings.json").write_text('{"agent": "hammer.mei"}')
+
+            conf_path = root / "project" / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir(parents=True)
+            conf_path.write_text(
+                f'[[profiles]]\nname = "hammer.mei"\nrepo = "{profile}"\n'
+                '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
+                '[[agents]]\nname = "wave.bro"\nsource = "profile"\n'
+            )
+            project_root = conf_path.parent.parent
+            registry = root / "registry.json"
+
+            # Mock resolve_profile_root so the test doesn't need a real git repo
+            with (
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm, "resolve_profile_root", return_value=profile),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    source,
+                    project_root,
+                    registry_path=registry,
+                )
+
+            machine_env = project_root / ".tamago" / "machine.env"
+            self.assertTrue(machine_env.exists())
+            content = machine_env.read_text()
+            self.assertIn("AGENT_NAMES=", content)
+            self.assertIn("hammer.mei", content)
+            self.assertIn("wave.bro", content)
+            # AGENT_NAME stays as first agent (backward compat)
+            self.assertIn("AGENT_NAME='hammer.mei'", content)
 
 
 # ---------------------------------------------------------------------------
@@ -7276,6 +7420,8 @@ class TestInstallFromConfPlugins(unittest.TestCase):
 name = "nagori"
 repo = "/opt/nagori"
 """)
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
             with (
                 mock.patch.object(sm, "setup", return_value=0),
                 mock.patch.object(sm, "pull_repo"),
@@ -7287,6 +7433,7 @@ repo = "/opt/nagori"
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             self.assertEqual(result, 0)
@@ -7344,6 +7491,8 @@ repo = "/opt/nagori"
 name  = "nagori"
 repo  = "/opt/nagori"
 """)
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
             captured_plugins = []
 
             def capture_plugins(op, plugins, project_root, cache_root=None, **kwargs):
@@ -7361,6 +7510,7 @@ repo  = "/opt/nagori"
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             self.assertEqual(len(captured_plugins), 1)
@@ -7375,6 +7525,8 @@ repo  = "/opt/nagori"
 name = "nagori"
 repo = "https://github.com/you/nagori.git"
 """)
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("")
             with (
                 mock.patch.object(sm, "setup", return_value=0),
                 mock.patch.object(sm, "pull_repo"),
@@ -7389,6 +7541,7 @@ repo = "https://github.com/you/nagori.git"
                     Path(td) / "source",
                     Path(td) / "project",
                     pull_cached_skills=True,
+                    global_conf_path=empty_global,
                 )
 
             mock_pull_plugins.assert_called_once()

@@ -14,6 +14,12 @@
 #   1. .tamago/machine.env  (written by `tamago install`, shell-sourceable KEY=VALUE)
 #   2. ~/.tamago/machine.env  (global agent install, no project-level config)
 #   If none found the project has no tamago agent — exit silently.
+#
+# Multi-agent support:
+#   AGENT_NAMES in machine.env holds a space-separated list of all installed agents.
+#   memory-sync.sh loops over them for --init (env dir + visited.md per agent).
+#   --pull and --push operate on the whole profile repo — no per-agent loop needed.
+#   Backward compat: falls back to single AGENT_NAME when AGENT_NAMES is absent.
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 MEMORY_PATH="agents/memory"
@@ -51,26 +57,22 @@ case "$1" in
   --init)
     HOSTNAME=$(hostname)
 
-    # Determine agent name — prefer AGENT_NAME from machine.env (set during discovery
-    # above), fall back to reading it from profile's settings.json.
-    if [ -z "$AGENT_NAME" ]; then
+    # Determine the list of agents to init.
+    # Priority: AGENT_NAMES (multi-agent list) > AGENT_NAME (legacy single) > settings.json.
+    if [ -n "$AGENT_NAMES" ]; then
+      INIT_AGENTS="$AGENT_NAMES"
+    elif [ -n "$AGENT_NAME" ]; then
+      INIT_AGENTS="$AGENT_NAME"
+    else
       AGENT_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
       if [ -f "$AGENT_SETTINGS" ]; then
-        AGENT_NAME=$(python3 -c "
+        INIT_AGENTS=$(python3 -c "
 import json, sys
 print(json.load(open(sys.argv[1])).get('agent', 'hammer.mei'))
 " "$AGENT_SETTINGS" 2>/dev/null || echo "hammer.mei")
       else
-        AGENT_NAME="hammer.mei"
+        INIT_AGENTS="hammer.mei"
       fi
-    fi
-
-    ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/$AGENT_NAME/env-$HOSTNAME"
-
-    # 1. Ensure env dir exists
-    if [ ! -d "$ENV_DIR" ]; then
-      mkdir -p "$ENV_DIR"
-      printf "# Environment Memory — %s\n\n首次見面：%s\n" "$HOSTNAME" "$(date +%Y-%m-%d)" > "$ENV_DIR/MEMORY.md"
     fi
 
     # 2. Harness — use explicit argument if provided, otherwise best-effort detect
@@ -101,16 +103,32 @@ print(json.load(open(sys.argv[1])).get('defaultModel', 'unknown'))
       MODEL="unknown"
     fi
 
-    # 4. Append to visited.md only if harness+model changed
-    VISITED="$ENV_DIR/visited.md"
-    LAST=$(tail -1 "$VISITED" 2>/dev/null || echo "")
-    if ! echo "$LAST" | grep -q "| $HARNESS | $MODEL"; then
-      if [ ! -f "$VISITED" ]; then
-        printf "# Visited Log — %s\n\nRecords when harness or model changes. Append-only.\nFormat: \`- {YYYY-MM-DD} | {harness} | {model}\`\n\n" "$HOSTNAME" > "$VISITED"
-      fi
-      printf -- "- %s | %s | %s\n" "$(date +%Y-%m-%d)" "$HARNESS" "$MODEL" >> "$VISITED"
+    # 4. Init env dir + visited.md for each agent; commit once at the end.
+    NEEDS_COMMIT=false
+    for AGENT in $INIT_AGENTS; do
+      ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/$AGENT/env-$HOSTNAME"
 
-      # 5. Commit + push immediately so UserPromptSubmit pull sees a clean working tree
+      # Ensure env dir exists
+      if [ ! -d "$ENV_DIR" ]; then
+        mkdir -p "$ENV_DIR"
+        printf "# Environment Memory — %s\n\n首次見面：%s\n" "$HOSTNAME" "$(date +%Y-%m-%d)" > "$ENV_DIR/MEMORY.md"
+        NEEDS_COMMIT=true
+      fi
+
+      # Append to visited.md only if harness+model changed
+      VISITED="$ENV_DIR/visited.md"
+      LAST=$(tail -1 "$VISITED" 2>/dev/null || echo "")
+      if ! echo "$LAST" | grep -q "| $HARNESS | $MODEL"; then
+        if [ ! -f "$VISITED" ]; then
+          printf "# Visited Log — %s\n\nRecords when harness or model changes. Append-only.\nFormat: \`- {YYYY-MM-DD} | {harness} | {model}\`\n\n" "$HOSTNAME" > "$VISITED"
+        fi
+        printf -- "- %s | %s | %s\n" "$(date +%Y-%m-%d)" "$HARNESS" "$MODEL" >> "$VISITED"
+        NEEDS_COMMIT=true
+      fi
+    done
+
+    # 5. Commit + push immediately so UserPromptSubmit pull sees a clean working tree
+    if [ "$NEEDS_COMMIT" = true ]; then
       cd "$MEMORY_REPO" && \
         git add "$MEMORY_PATH" && \
         git commit -m "auto: session init footprint" --quiet && \

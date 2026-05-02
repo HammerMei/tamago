@@ -454,6 +454,7 @@ def write_machine_env(
     agent_name: str | None,
     memory_sync: bool = True,
     tts_enabled: bool = True,
+    agent_names: "list[str] | None" = None,
 ) -> None:
     """Write (or remove) .tamago/machine.env — a shell-sourceable KEY=VALUE bridge.
 
@@ -461,15 +462,23 @@ def write_machine_env(
     parser.  Values containing paths or user-supplied strings are single-quoted so
     sourcing the file is safe even when they contain spaces or shell metacharacters.
     The file is gitignored (machine-local) and regenerated on every install.
+
+    agent_names: full list of non-disabled agent names (multi-agent support).
+      Written as AGENT_NAMES='name1 name2 ...' — memory-sync.sh loops over this.
+      Falls back to [agent_name] when not provided (backward compat).
     """
     if profile_repo is None:
         if path.exists():
             path.unlink()
             print(f"removed {path}")
         return
+    # AGENT_NAMES: space-separated list for memory-sync.sh to iterate over.
+    # If agent_names list not provided, fall back to single agent_name for compat.
+    names_str = " ".join(agent_names) if agent_names else (agent_name or "")
     lines = [
         f"PROFILE_REPO={_shell_quote_value(str(profile_repo.resolve()))}",
         f"AGENT_NAME={_shell_quote_value(agent_name or '')}",
+        f"AGENT_NAMES={_shell_quote_value(names_str)}",
         f"MEMORY_SYNC={1 if memory_sync else 0}",
         f"TTS_ENABLED={1 if tts_enabled else 0}",
     ]
@@ -2146,6 +2155,7 @@ def setup(
     disabled_agents: "set[str] | None" = None,
     install_globally: bool = False,
     agent_name: str | None = None,
+    agent_names: "list[str] | None" = None,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
@@ -2157,11 +2167,11 @@ def setup(
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
         global_machine_env = Path.home() / ".tamago" / MACHINE_ENV_NAME
         if operation == Operation.INSTALL:
-            write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
+            write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled, agent_names=agent_names)
             if install_globally:
                 # Global install: also write ~/.tamago/machine.env so memory-sync.sh
                 # finds the profile when Claude runs outside this project directory.
-                write_machine_env(global_machine_env, profile_root, agent_name, memory_sync, tts_enabled)
+                write_machine_env(global_machine_env, profile_root, agent_name, memory_sync, tts_enabled, agent_names=agent_names)
         elif operation == Operation.UNINSTALL:
             write_machine_env(machine_env, None, "")
             if install_globally:
@@ -2522,11 +2532,10 @@ def install_from_conf(
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
 
-    # Agent name for default-agent pointer: first non-disabled agent in conf.
-    agent_name: str | None = next(
-        (a.name for a in conf.agents if not a.disable),
-        None,
-    )
+    # Agent names: all non-disabled agents (multi-agent "全家桶" support).
+    # The first one also doubles as the default-agent pointer for settings.
+    agent_names: list[str] = [a.name for a in conf.agents if not a.disable]
+    agent_name: str | None = agent_names[0] if agent_names else None
 
     rc = setup(
         operation,
@@ -2539,6 +2548,7 @@ def install_from_conf(
         disabled_agents=disabled_agents,
         install_globally=False,
         agent_name=agent_name,
+        agent_names=agent_names,
     )
     if rc != 0:
         return rc
@@ -2715,9 +2725,9 @@ def install_global_from_conf(
         if a.source == "profile":
             tts_enabled = a.tts
             break
-    agent_name: str | None = next(
-        (a.name for a in conf.agents if not a.disable), None
-    )
+    # Agent names: all non-disabled agents (multi-agent support).
+    agent_names: list[str] = [a.name for a in conf.agents if not a.disable]
+    agent_name: str | None = agent_names[0] if agent_names else None
 
     # CONVENTIONAL_ROOT (~/.tamago) is used as stand-in project_root.
     # With install_globally=True, setup_agents/setup_skills route to ~/.claude/ so
@@ -2765,6 +2775,7 @@ def install_global_from_conf(
             write_machine_env(
                 global_machine_env, profile_root, agent_name,
                 conf.memory_sync, tts_enabled,
+                agent_names=agent_names,
             )
         except Exception as e:
             print(e, file=sys.stderr)
