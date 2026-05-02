@@ -2004,16 +2004,27 @@ def setup_plugins(
     return 1 if errors else 0
 
 
-def run_health_check(source_root: Path, project_root: Path) -> None:
-    """Run health-check.sh after install to surface any environment issues."""
+def run_health_check(
+    source_root: Path,
+    project_root: Path,
+    install_globally: bool = False,
+) -> None:
+    """Run health-check.sh after install to surface any environment issues.
+
+    For global installs the health check must inspect $HOME (so that
+    $PROJECT_DIR/.tamago/machine.env resolves to ~/.tamago/machine.env and
+    global skill symlinks under ~/.claude/skills/ are checked).  For project
+    installs the caller-supplied project_root is passed as-is.
+    """
     health_check = source_root / "scripts" / "health-check.sh"
     if not health_check.exists():
         print("skip    health check (scripts/health-check.sh not found)")
         return
 
+    check_dir = Path.home() if install_globally else project_root
     print("\n" + "─" * 60)
     subprocess.run(
-        ["bash", str(health_check), "--project", str(project_root)],
+        ["bash", str(health_check), "--project", str(check_dir)],
         check=False,
     )
 
@@ -2561,7 +2572,7 @@ def install_from_conf(
     # Run health check after everything is written — machine.toml must exist before
     # the check runs, otherwise the first install always warns about it being missing.
     if operation == Operation.INSTALL:
-        run_health_check(source_root, project_root)
+        run_health_check(source_root, project_root, install_globally=False)
 
     return rc
 
@@ -2787,7 +2798,7 @@ def install_global_from_conf(
 
     # ── Health check ──────────────────────────────────────────────────────────
     if operation == Operation.INSTALL:
-        run_health_check(source_root, global_root)
+        run_health_check(source_root, global_root, install_globally=True)
 
     return 1 if errors else 0
 

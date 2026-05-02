@@ -431,6 +431,29 @@ class RunHealthCheckTests(unittest.TestCase):
                 check=False,
             )
 
+    def test_install_globally_uses_home_as_project_dir(self):
+        """install_globally=True passes Path.home() as --project to health-check.sh.
+
+        The global machine.env lives at ~/.tamago/machine.env; the script looks for
+        $PROJECT_DIR/.tamago/machine.env, so PROJECT_DIR must be $HOME for the path
+        to resolve correctly.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir)
+            scripts_dir = source_root / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "health-check.sh").write_text("#!/bin/bash\necho ok")
+
+            with mock.patch("subprocess.run") as run_mock:
+                run_mock.return_value = mock.Mock(returncode=0)
+                sm.run_health_check(source_root, Path(temp_dir), install_globally=True)
+
+            run_mock.assert_called_once_with(
+                ["bash", str(source_root / "scripts" / "health-check.sh"),
+                 "--project", str(Path.home())],
+                check=False,
+            )
+
     def test_does_not_raise_when_health_check_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_root = Path(temp_dir)
