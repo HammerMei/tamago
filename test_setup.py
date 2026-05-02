@@ -919,7 +919,7 @@ class MachineEnvTests(unittest.TestCase):
 
 
 class GlobalMachineEnvTests(unittest.TestCase):
-    """Tests for ~/.tamago/machine.env written by setup() when global_agents is set."""
+    """Tests for ~/.tamago/machine.env written by setup() when install_globally=True."""
 
     def _make_minimal_source(self, root: Path) -> tuple[Path, Path]:
         source = root / "tamago"
@@ -938,8 +938,8 @@ class GlobalMachineEnvTests(unittest.TestCase):
         fake.mkdir(parents=True, exist_ok=True)
         return classmethod(lambda cls: fake)
 
-    def test_global_agent_writes_home_machine_env_on_install(self):
-        """setup() writes ~/.tamago/machine.env when global_agents is non-empty."""
+    def test_global_install_writes_home_machine_env_on_install(self):
+        """setup() writes ~/.tamago/machine.env when install_globally=True."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source, project = self._make_minimal_source(root)
@@ -954,7 +954,7 @@ class GlobalMachineEnvTests(unittest.TestCase):
                     project,
                     profile_root=profile,
                     agent_name="hammer.mei",
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             global_env = fake_home / ".tamago" / "machine.env"
@@ -963,8 +963,8 @@ class GlobalMachineEnvTests(unittest.TestCase):
             self.assertIn("PROFILE_REPO=", content)
             self.assertIn("hammer.mei", content)
 
-    def test_no_global_agent_does_not_write_home_machine_env(self):
-        """setup() must NOT write ~/.tamago/machine.env when global_agents is empty."""
+    def test_project_install_does_not_write_home_machine_env(self):
+        """setup() must NOT write ~/.tamago/machine.env when install_globally=False."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source, project = self._make_minimal_source(root)
@@ -975,10 +975,10 @@ class GlobalMachineEnvTests(unittest.TestCase):
 
             global_env = fake_home / ".tamago" / "machine.env"
             self.assertFalse(global_env.exists(),
-                             "~/.tamago/machine.env written unexpectedly without global_agents")
+                             "~/.tamago/machine.env written unexpectedly for project install")
 
-    def test_global_agent_removes_home_machine_env_on_uninstall(self):
-        """setup(UNINSTALL) removes ~/.tamago/machine.env when global_agents is non-empty."""
+    def test_global_install_removes_home_machine_env_on_uninstall(self):
+        """setup(UNINSTALL) removes ~/.tamago/machine.env when install_globally=True."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source, project = self._make_minimal_source(root)
@@ -994,7 +994,7 @@ class GlobalMachineEnvTests(unittest.TestCase):
                     sm.Operation.UNINSTALL,
                     source,
                     project,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             self.assertFalse(global_env.exists(),
@@ -1016,7 +1016,7 @@ class GlobalMachineEnvTests(unittest.TestCase):
                     project,
                     profile_root=profile,
                     agent_name="hammer.mei",
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             project_env = project / ".tamago" / "machine.env"
@@ -3919,7 +3919,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source,
                     project,
-                    global_agents={"code-reviewer"},
+                    install_globally=True,
                 )
 
             # Should be in home dir, NOT in project dir
@@ -3950,7 +3950,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             home_mem = home_root / ".claude" / "agent-memory" / "hammer.mei"
@@ -3960,8 +3960,12 @@ class GlobalAgentScopeTests(unittest.TestCase):
             self.assertTrue(home_mem.is_symlink())
             self.assertFalse(project_mem.exists())
 
-    def test_install_from_conf_builds_global_agents_set(self):
-        """install_from_conf computes global_agents from scope='global' entries."""
+    def test_install_from_conf_scope_global_agent_warns_and_ignored(self):
+        """Two-tier model: scope='global' in project conf is ignored; global_agents is always empty.
+
+        A deprecation warning is emitted to stderr so users know to move the entry
+        to ~/.tamago/tamago.conf instead.
+        """
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text(
@@ -3973,12 +3977,15 @@ class GlobalAgentScopeTests(unittest.TestCase):
             captured: dict = {}
 
             def fake_setup(*args, **kwargs):
-                captured["global_agents"] = kwargs.get("global_agents")
+                captured["install_globally"] = kwargs.get("install_globally")
                 return 0
 
+            import io
+            stderr_buf = io.StringIO()
             with (
                 mock.patch.object(sm, "setup", side_effect=fake_setup),
                 mock.patch.object(sm, "pull_repo"),
+                mock.patch("sys.stderr", stderr_buf),
             ):
                 sm.install_from_conf(
                     conf_path,
@@ -3988,10 +3995,15 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     registry_path=registry,
                 )
 
-            self.assertEqual(captured["global_agents"], {"hammer.mei"})
+            # install_globally must be False — project conf is always project-scoped
+            self.assertFalse(captured.get("install_globally", False))
+            # warning must be emitted for the deprecated scope="global"
+            self.assertIn("scope=\"global\"", stderr_buf.getvalue())
+            self.assertIn("hammer.mei", stderr_buf.getvalue())
+            self.assertIn("~/.tamago/tamago.conf", stderr_buf.getvalue())
 
-    def test_disabled_agent_not_in_global_agents(self):
-        """A disabled agent (disable=true) must not appear in global_agents even if scope=global."""
+    def test_disabled_agent_is_in_disabled_agents(self):
+        """A disabled agent (disable=true) appears in disabled_agents regardless of scope."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text(
@@ -4003,7 +4015,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
             captured: dict = {}
 
             def fake_setup(*args, **kwargs):
-                captured["global_agents"] = kwargs.get("global_agents")
+                captured["install_globally"] = kwargs.get("install_globally")
                 captured["disabled_agents"] = kwargs.get("disabled_agents")
                 return 0
 
@@ -4019,7 +4031,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     registry_path=registry,
                 )
 
-            self.assertNotIn("hammer.mei", captured.get("global_agents", set()))
+            self.assertFalse(captured.get("install_globally", False))
             self.assertIn("hammer.mei", captured.get("disabled_agents", set()))
 
     def test_global_persona_agent_merged_to_home_dir(self):
@@ -4055,7 +4067,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             # Generated in home dir
@@ -4358,7 +4370,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source,
                     project,
-                    has_global_agent=False,  # all agents are project-scoped
+                    install_globally=False,
                 )
 
             self.assertTrue((home_claude_skills / "tts").is_symlink())
@@ -4379,7 +4391,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source,
                     project,
-                    has_global_agent=True,
+                    install_globally=True,
                 )
 
             self.assertTrue((home_claude_skills / "tts").is_symlink())
@@ -4400,7 +4412,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    has_global_agent=True,
+                    install_globally=True,
                 )
 
             self.assertTrue((home_claude_skills / "agent-skill").is_symlink())
@@ -4421,7 +4433,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
             self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
@@ -4442,7 +4454,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
             # Tamago built-in → global
@@ -4452,8 +4464,8 @@ class SkillScopeRoutingTests(unittest.TestCase):
             self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
             self.assertFalse((home_claude_skills / "agent-skill").exists())
 
-    def test_explicit_project_scope_overrides_tamago_builtin_default(self):
-        """scope="project" in [[skills]] forces a tamago built-in to project level."""
+    def test_tamago_builtin_always_global_regardless_of_install_globally(self):
+        """Tamago built-ins always go to ~/.claude/skills/ — there is no override."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, ["tts"])
@@ -4461,19 +4473,19 @@ class SkillScopeRoutingTests(unittest.TestCase):
             home_claude_skills = root / "home" / ".claude" / "skills"
 
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                # Even with install_globally=False, tamago built-ins go to global
                 sm.setup_skills(
                     sm.Operation.INSTALL,
                     source,
                     project,
-                    project_scoped_skills={"tts"},
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
-            self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
-            self.assertFalse((home_claude_skills / "tts").exists())
+            self.assertTrue((home_claude_skills / "tts").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "tts").exists())
 
-    def test_explicit_project_scope_overrides_profile_skill_on_global_agent(self):
-        """scope="project" in [[skills]] forces a profile skill to project even for global agent."""
+    def test_install_globally_true_puts_profile_skill_global(self):
+        """install_globally=True sends profile skills to ~/.claude/skills/."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, [])
@@ -4487,12 +4499,11 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    project_scoped_skills={"agent-skill"},
-                    has_global_agent=True,
+                    install_globally=True,
                 )
 
-            self.assertTrue((project / ".claude" / "skills" / "agent-skill").is_symlink())
-            self.assertFalse((home_claude_skills / "agent-skill").exists())
+            self.assertTrue((home_claude_skills / "agent-skill").is_symlink())
+            self.assertFalse((project / ".claude" / "skills" / "agent-skill").exists())
 
     def test_profile_shadows_tamago_builtin_project_agent_goes_project(self):
         """When profile shadows a tamago built-in, profile rules apply: project agent → project."""
@@ -4509,7 +4520,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
             # Profile version used, profile rules apply → project scope
@@ -4531,7 +4542,7 @@ class SkillScopeRoutingTests(unittest.TestCase):
                     source,
                     project,
                     profile_root=profile,
-                    has_global_agent=True,
+                    install_globally=True,
                 )
 
             # Profile version used, profile rules apply → global scope
@@ -5396,8 +5407,8 @@ class InstallGlobalFromConfTests(unittest.TestCase):
         self.assertEqual(plugins_arg[0].name, "nagori")
         self.assertEqual(rc, 0)
 
-    def test_conf_with_agent_passes_all_as_global_agents(self):
-        """All non-disabled agents in the global conf are in global_agents kwarg."""
+    def test_conf_with_agent_passes_install_globally_true(self):
+        """setup_agents is called with install_globally=True from the global conf path."""
         with tempfile.TemporaryDirectory() as td:
             conf = Path(td) / "tamago.conf"
             conf.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
@@ -5406,7 +5417,7 @@ class InstallGlobalFromConfTests(unittest.TestCase):
 
         patches["setup_agents"].assert_called_once()
         _, kwargs = patches["setup_agents"].call_args
-        self.assertIn("hammer.mei", kwargs.get("global_agents", set()))
+        self.assertTrue(kwargs.get("install_globally", False))
         self.assertEqual(rc, 0)
 
     def test_infra_failure_returns_1_conf_items_still_processed(self):
@@ -5475,7 +5486,7 @@ class SetupSkillsBinAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_skills(
                     sm.Operation.INSTALL, source, project,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
             self.assertTrue((local_bin / "tts-cli.py").is_symlink())
@@ -5491,45 +5502,57 @@ class SetupSkillsBinAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_skills(
                     sm.Operation.INSTALL, source, project,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
                 self.assertTrue((home_claude_skills / "tts").is_symlink())
                 self.assertTrue((local_bin / "tts-cli.py").is_symlink())
 
                 sm.setup_skills(
                     sm.Operation.UNINSTALL, source, project,
-                    has_global_agent=False,
+                    install_globally=False,
                 )
 
             self.assertFalse((home_claude_skills / "tts").exists())
             self.assertFalse((local_bin / "tts-cli.py").exists())
 
-    def test_project_scoped_skill_bin_stays_in_local_bin(self):
+    def test_project_scoped_profile_skill_bin_stays_in_local_bin(self):
         """bin/ tools are installed to ~/.local/bin regardless of skill scope.
 
         A skill's bin/ directory contains system-level CLI tools (e.g. tts-cli.py)
         that must remain on PATH even when the skill itself is project-scoped.
+        Profile skills go to project level when install_globally=False.
         """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            source = self._make_source_with_bin_skill(root, "tts")
+            # Create a profile skill with a bin/ dir
+            source = root / "tamago"
+            (source / "skills").mkdir(parents=True)
+            profile = root / "profile"
+            skill_dir = profile / "skills" / "my-tool"
+            bin_dir = skill_dir / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "my-tool-cli.py").write_text("#!/usr/bin/env python3\n")
             project = root / "project"
             local_bin = root / "home" / ".local" / "bin"
 
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
-                # Install with project scope
+                # Install with project scope (install_globally=False for profile skills)
                 sm.setup_skills(
                     sm.Operation.INSTALL, source, project,
-                    project_scoped_skills={"tts"},
-                    has_global_agent=False,
+                    profile_root=profile,
+                    install_globally=False,
                 )
 
-            # bin entry must still be present even though skill is project-scoped
-            self.assertTrue((local_bin / "tts-cli.py").is_symlink())
-            self.assertTrue((project / ".claude" / "skills" / "tts").is_symlink())
+            # bin entry must be present even though the skill is project-scoped
+            self.assertTrue((local_bin / "my-tool-cli.py").is_symlink())
+            self.assertTrue((project / ".claude" / "skills" / "my-tool").is_symlink())
 
-    def test_stale_project_symlink_removed_when_skill_moves_to_global(self):
-        """When a project-scoped skill moves to global, old project/.claude/skills/ symlink is removed."""
+    def test_stale_project_symlink_removed_when_tamago_builtin_is_reinstalled(self):
+        """A stale project-level symlink for a tamago built-in is cleaned up on reinstall.
+
+        Tamago built-ins always go to ~/.claude/skills/.  If a stale project-level
+        symlink exists from an old install, it is removed on the next install run.
+        """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = root / "tamago"
@@ -5542,10 +5565,10 @@ class SetupSkillsBinAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_skills(
                     sm.Operation.INSTALL, source, project,
-                    has_global_agent=False,  # tamago built-in → global
+                    install_globally=False,  # tamago built-in → always global
                 )
 
-            # Old project-level symlink must be gone
+            # Old project-level symlink must be gone (moved to global)
             self.assertFalse((project_skills / "tts").exists())
             # Now installed at global
             self.assertTrue((root / "home" / ".claude" / "skills" / "tts").is_symlink())
@@ -5600,7 +5623,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source, project,
                     profile_root=profile,
-                    global_agents=set(),
+                    install_globally=False,
                 )
 
             mem_root = project / ".claude" / "agent-memory"
@@ -5627,7 +5650,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             home_root = root / "home" / ".claude" / "agent-memory"
@@ -5650,7 +5673,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source, project,
                     profile_root=profile,
-                    global_agents=set(),
+                    install_globally=False,
                 )
                 proj_mem_root = project / ".claude" / "agent-memory"
                 self.assertTrue((proj_mem_root / "hammer.mei").is_symlink())
@@ -5661,7 +5684,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
 
             # Both project symlinks cleaned up
@@ -5681,7 +5704,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
-                    profile_root=profile, global_agents=set(),
+                    profile_root=profile, install_globally=False,
                 )
                 mem_root = project / ".claude" / "agent-memory"
                 self.assertTrue((mem_root / "hammer.mei").is_symlink())
@@ -5689,7 +5712,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
 
                 sm.setup_agents(
                     sm.Operation.UNINSTALL, source, project,
-                    profile_root=profile, global_agents=set(),
+                    profile_root=profile, install_globally=False,
                 )
 
             # Both symlink forms must be removed
@@ -5708,7 +5731,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
-                    profile_root=profile, global_agents={"hammer.mei"},
+                    profile_root=profile, install_globally=True,
                 )
                 home_root = root / "home" / ".claude" / "agent-memory"
                 self.assertTrue((home_root / "hammer.mei").is_symlink())
@@ -5716,7 +5739,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
 
                 sm.setup_agents(
                     sm.Operation.UNINSTALL, source, project,
-                    profile_root=profile, global_agents={"hammer.mei"},
+                    profile_root=profile, install_globally=True,
                 )
 
             self.assertFalse((home_root / "hammer.mei").exists())
@@ -5742,7 +5765,7 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
-                    profile_root=profile, global_agents=set(),
+                    profile_root=profile, install_globally=False,
                 )
 
             # Empty dir must be replaced with symlink
@@ -5806,7 +5829,7 @@ class MergeAgentScopeTests(unittest.TestCase):
             sm.setup_agents(
                 sm.Operation.INSTALL, source, project,
                 profile_root=profile,
-                global_agents=set(),
+                install_globally=False,
             )
 
             content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
@@ -5825,7 +5848,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
                 home_agents = root / "home" / ".claude" / "agents"
                 content = (home_agents / "hammer.mei.md").read_text()
@@ -5844,7 +5867,7 @@ class MergeAgentScopeTests(unittest.TestCase):
             sm.setup_agents(
                 sm.Operation.INSTALL, source, project,
                 profile_root=profile,
-                global_agents=set(),
+                install_globally=False,
             )
 
             content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
@@ -5869,7 +5892,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
                 home_agents = root / "home" / ".claude" / "agents"
                 content = (home_agents / "hammer.mei.md").read_text()
@@ -5894,7 +5917,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents=set(),
+                    install_globally=False,
                 )
                 proj_content = (
                     project / ".claude" / "agents" / "hammer.mei.md"
@@ -5905,7 +5928,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
                 home_agents = root / "home" / ".claude" / "agents"
                 global_content = (home_agents / "hammer.mei.md").read_text()
@@ -5925,7 +5948,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents={"hammer.mei"},
+                    install_globally=True,
                 )
                 home_agents = root / "home" / ".claude" / "agents"
                 global_content = (home_agents / "hammer.mei.md").read_text()
@@ -5935,7 +5958,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 sm.setup_agents(
                     sm.Operation.INSTALL, source, project,
                     profile_root=profile,
-                    global_agents=set(),
+                    install_globally=False,
                 )
 
             proj_content = (

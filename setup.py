@@ -1329,21 +1329,20 @@ def setup_agents(
     profile_root: Path | None = None,
     tts_enabled: bool = True,
     disabled_agents: "set[str] | None" = None,
-    global_agents: "set[str] | None" = None,
+    install_globally: bool = False,
 ):
-    """Install/uninstall agents into project_root (and optionally into ~/.claude/agents/).
+    """Install/uninstall agents into project_root (or ~/.claude/agents/ when install_globally=True).
 
-    disabled_agents: skip entirely — no agent file, no memory dir.
-    global_agents:   install to ~/.claude/agents/ instead of project-level agents dir;
-                     memory dirs are still installed at project level so per-project
-                     memory works correctly.
-    On UNINSTALL: both project-level and home-level dirs are checked, so a scope
-    change between installs does not leave orphaned files.
+    disabled_agents:   skip entirely — no agent file, no memory dir.
+    install_globally:  when True, install to ~/.claude/agents/ (and ~/.opencode/agents/)
+                       instead of the project-level agents dir.  Memory dirs follow the
+                       same routing.  Use for the global-conf path (tamago install-global).
+    On UNINSTALL: the scope matches the current install_globally flag.  If scope changed
+    between installs without re-running install, orphaned files may remain — acceptable;
+    the user can clean them up manually or re-install first.
     """
     if disabled_agents is None:
         disabled_agents = set()
-    if global_agents is None:
-        global_agents = set()
 
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
@@ -1359,11 +1358,9 @@ def setup_agents(
     all_claude_dirs = [target_claude_agent_root, home_claude_agents]
     all_opencode_dirs = [target_opencode_agent_root, home_opencode_agents]
 
-    def _claude_dir(agent_name: str) -> Path:
-        return home_claude_agents if agent_name in global_agents else target_claude_agent_root
-
-    def _opencode_dir(agent_name: str) -> Path:
-        return home_opencode_agents if agent_name in global_agents else target_opencode_agent_root
+    # Route all agents to the same tier (global or project) — no per-agent routing.
+    claude_agents_dir  = home_claude_agents  if install_globally else target_claude_agent_root
+    opencode_agents_dir = home_opencode_agents if install_globally else target_opencode_agent_root
 
     opencode_plugin_files = sub_paths(
         source_opencode_plugin_root, lambda p: p.is_file() and p.suffix == ".ts"
@@ -1380,19 +1377,19 @@ def setup_agents(
         for agent_name in disabled_agents:
             _remove_agent_files_if_managed(agent_name, all_claude_dirs + all_opencode_dirs, "disabled")
 
-        # Remove project-level files for agents that moved to global scope
-        # (covers the case where scope was previously "project" and is now "global")
-        for agent_name in global_agents:
-            _remove_agent_files_if_managed(
-                agent_name,
-                [target_claude_agent_root, target_opencode_agent_root],
-                "moved to global scope",
-            )
+        if install_globally:
+            # Remove project-level files for all agents (scope flip: project → global)
+            for f in enabled_tamago_agents:
+                _remove_agent_files_if_managed(
+                    f.stem,
+                    [target_claude_agent_root, target_opencode_agent_root],
+                    "moved to global scope",
+                )
 
-        # 1. Symlink tamago generic agents — routed to project or home by scope
+        # 1. Symlink tamago generic agents — routed to project or global tier
         for f in enabled_tamago_agents:
-            symlink_paths([f], _claude_dir(f.stem))
-            symlink_paths([f], _opencode_dir(f.stem))
+            symlink_paths([f], claude_agents_dir)
+            symlink_paths([f], opencode_agents_dir)
         symlink_paths(opencode_plugin_files, target_opencode_plugin_root)
 
         # 2. Merge persona agents from profile (*.persona.md → generated *.md)
@@ -1403,10 +1400,21 @@ def setup_agents(
                 lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
             )
             enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
-            for f in enabled_profile_agents:
-                symlink_paths([f], _claude_dir(f.stem))
-                symlink_paths([f], _opencode_dir(f.stem))
 
+            if install_globally:
+                # Remove project-level files for all profile agents (scope flip: project → global)
+                for f in enabled_profile_agents:
+                    _remove_agent_files_if_managed(
+                        f.stem,
+                        [target_claude_agent_root, target_opencode_agent_root],
+                        "moved to global scope",
+                    )
+
+            for f in enabled_profile_agents:
+                symlink_paths([f], claude_agents_dir)
+                symlink_paths([f], opencode_agents_dir)
+
+            agent_scope = "user" if install_globally else "project"
             for persona_file in sorted((profile_root / "agents").iterdir()):
                 if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
                     agent_name = persona_file.stem
@@ -1414,9 +1422,8 @@ def setup_agents(
                         agent_name = agent_name[: -len(".persona")]
                     if agent_name in disabled_agents:
                         continue
-                    agent_scope = "user" if agent_name in global_agents else "project"
-                    _merge_agent(source_root, profile_root, persona_file, _claude_dir(agent_name), tts_enabled, scope=agent_scope)
-                    _merge_agent(source_root, profile_root, persona_file, _opencode_dir(agent_name), tts_enabled, scope=agent_scope)
+                    _merge_agent(source_root, profile_root, persona_file, claude_agents_dir, tts_enabled, scope=agent_scope)
+                    _merge_agent(source_root, profile_root, persona_file, opencode_agents_dir, tts_enabled, scope=agent_scope)
 
         # 3. Memory dirs — follow agent scope (same as agent file)
         #    Global agents: ~/.claude/agent-memory/  (accessible from any project)
@@ -1434,30 +1441,27 @@ def setup_agents(
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
             enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
 
-            # Remove project-level memory symlinks for agents that moved to global scope
-            # (both canonical and normalized forms — see _agent_memory_link_names)
-            for d in enabled_mem_dirs:
-                if d.name in global_agents:
+            if install_globally:
+                # Remove project-level memory symlinks (scope flip: project → global)
+                for d in enabled_mem_dirs:
                     _unlink_mem_dir(d, target_claude_agent_mem_root)
-
-            global_mem_dirs = [d for d in enabled_mem_dirs if d.name in global_agents]
-            project_mem_dirs = [d for d in enabled_mem_dirs if d.name not in global_agents]
-            for d in global_mem_dirs:
-                _symlink_mem_dir(d, home_agent_mem_root)
-            for d in project_mem_dirs:
-                _symlink_mem_dir(d, target_claude_agent_mem_root)
+                for d in enabled_mem_dirs:
+                    _symlink_mem_dir(d, home_agent_mem_root)
+            else:
+                for d in enabled_mem_dirs:
+                    _symlink_mem_dir(d, target_claude_agent_mem_root)
 
     elif operation == Operation.UNINSTALL:
-        # Determine which dirs to clean up for a given agent, based on current conf scope.
-        # If scope changed between installs without re-running install, an orphan may remain —
-        # that is acceptable; the user can clean it up manually or re-install first.
-        def _uninstall_dirs(agent_name: str) -> list[Path]:
-            if agent_name in global_agents:
-                return [home_claude_agents, home_opencode_agents]
-            return [target_claude_agent_root, target_opencode_agent_root]
+        # Determine which dirs to clean up based on current install_globally flag.
+        # If scope changed between installs without re-running install, an orphan may remain.
+        uninstall_dirs = (
+            [home_claude_agents, home_opencode_agents]
+            if install_globally
+            else [target_claude_agent_root, target_opencode_agent_root]
+        )
 
         for f in enabled_tamago_agents:
-            for d in _uninstall_dirs(f.stem):
+            for d in uninstall_dirs:
                 t = d / f.name
                 if t.is_symlink():
                     t.unlink()
@@ -1472,7 +1476,7 @@ def setup_agents(
             )
             enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
             for f in enabled_profile_agents:
-                for d in _uninstall_dirs(f.stem):
+                for d in uninstall_dirs:
                     t = d / f.name
                     if t.is_symlink():
                         t.unlink()
@@ -1487,7 +1491,7 @@ def setup_agents(
                     name = name[: -len(".persona")]
                 if name in disabled_agents:
                     continue
-                for d in _uninstall_dirs(name):
+                for d in uninstall_dirs:
                     _remove_agent_files_if_managed(name, [d])
 
         # Remove memory symlinks — scope-aware (mirrors INSTALL routing).
@@ -1500,8 +1504,8 @@ def setup_agents(
         if mem_source.is_dir():
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
             enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
+            mem_root = home_agent_mem_root if install_globally else target_claude_agent_mem_root
             for d in enabled_mem_dirs:
-                mem_root = home_agent_mem_root if d.name in global_agents else target_claude_agent_mem_root
                 _unlink_mem_dir(d, mem_root)
 
 
@@ -1515,33 +1519,30 @@ def setup_skills(
     project_root: Path,
     profile_root: Path | None = None,
     disabled_skills: "set[str] | None" = None,
-    project_scoped_skills: "set[str] | None" = None,
-    has_global_agent: bool = False,
+    install_globally: bool = False,
 ):
-    """Symlink skills into the appropriate location based on source and agent scope.
+    """Symlink skills into the appropriate location.
 
-    Scope routing rules (applied in this priority order):
-      1. Explicit scope="project" in [[skills]] (project_scoped_skills) → always project.
-      2. Tamago built-in skills (tamago/skills/, not shadowed by a profile skill) → global.
-      3. Profile skills (profile/skills/) → follow agent scope:
-           has_global_agent=True  → global
-           has_global_agent=False → project
-      When a profile skill shadows a tamago built-in (same name), the profile version is
-      used and profile scope rules apply (rule 3 above).
+    Routing rules:
+      - Tamago built-in skills (tamago/skills/) → always ~/.claude/skills/ (global),
+        regardless of install_globally.  They are shared across all projects.
+      - Profile skills (profile/skills/) → follow install_globally:
+          install_globally=True  → ~/.claude/skills/  (global)
+          install_globally=False → <project>/.claude/skills/
+
+    When a profile skill shadows a tamago built-in (same name), the profile version is
+    used and profile routing rules apply.
 
     Skills come from two sources (profile skills take precedence over tamago skills):
       1. tamago/skills/  — built-in skills bundled with tamago
       2. profile/skills/ — custom skills defined in the profile repo (optional)
 
-    disabled_skills:       names to skip entirely (remove existing symlinks on INSTALL).
-    project_scoped_skills: skill names with an explicit scope="project" in tamago.conf —
-                           always installed at project level regardless of source or agent scope.
-    has_global_agent:      True when at least one configured agent has scope="global".
+    disabled_skills:  names to skip entirely (remove existing symlinks on INSTALL).
+    install_globally: when True, install profile skills globally (used for the global-conf
+                      path: tamago install-global).
     """
     if disabled_skills is None:
         disabled_skills = set()
-    if project_scoped_skills is None:
-        project_scoped_skills = set()
 
     home_claude_skills = Path("~/.claude/skills").expanduser()
     home_opencode_skills = Path("~/.opencode/skills").expanduser()
@@ -1573,17 +1574,17 @@ def setup_skills(
     tamago_enabled = [d for d in tamago_only_dirs if d.name not in disabled_skills]
     profile_enabled = [d for d in profile_skill_dirs if d.name not in disabled_skills]
 
-    # Route tamago built-ins: global by default, project only if explicitly overridden
-    tamago_global = [d for d in tamago_enabled if d.name not in project_scoped_skills]
-    tamago_local  = [d for d in tamago_enabled if d.name in project_scoped_skills]
+    # Route tamago built-ins: always global (shared across all projects)
+    tamago_global: list[Path] = tamago_enabled
+    tamago_local:  list[Path] = []
 
-    # Route profile skills: follow agent scope, explicit project override wins
-    if has_global_agent:
-        profile_global = [d for d in profile_enabled if d.name not in project_scoped_skills]
-        profile_local  = [d for d in profile_enabled if d.name in project_scoped_skills]
+    # Route profile skills: follow install_globally
+    if install_globally:
+        profile_global: list[Path] = profile_enabled
+        profile_local:  list[Path] = []
     else:
         profile_global = []
-        profile_local  = profile_enabled  # all project by default when agent is project-scoped
+        profile_local  = profile_enabled  # project-local when not installing globally
 
     global_skill_dirs = tamago_global + profile_global
     local_skill_dirs  = tamago_local  + profile_local
@@ -2133,28 +2134,27 @@ def setup(
     tts_enabled: bool = True,
     disabled_skills: "set[str] | None" = None,
     disabled_agents: "set[str] | None" = None,
-    global_agents: "set[str] | None" = None,
-    project_scoped_skills: "set[str] | None" = None,
+    install_globally: bool = False,
     agent_name: str | None = None,
 ) -> int:
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, project_scoped_skills, has_global_agent=bool(global_agents))
-        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, global_agents=global_agents)
-        setup_settings(operation, source_root, project_root, profile_root, install_globally=bool(global_agents), agent_name=agent_name)
+        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, install_globally=install_globally)
+        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, install_globally=install_globally)
+        setup_settings(operation, source_root, project_root, profile_root, install_globally=install_globally, agent_name=agent_name)
 
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
         global_machine_env = Path.home() / ".tamago" / MACHINE_ENV_NAME
         if operation == Operation.INSTALL:
             write_machine_env(machine_env, profile_root, agent_name, memory_sync, tts_enabled)
-            if global_agents:
-                # Global agent: also write ~/.tamago/machine.env so memory-sync.sh
+            if install_globally:
+                # Global install: also write ~/.tamago/machine.env so memory-sync.sh
                 # finds the profile when Claude runs outside this project directory.
                 write_machine_env(global_machine_env, profile_root, agent_name, memory_sync, tts_enabled)
         elif operation == Operation.UNINSTALL:
             write_machine_env(machine_env, None, "")
-            if global_agents:
+            if install_globally:
                 write_machine_env(global_machine_env, None, "")
 
         return 0
@@ -2511,13 +2511,24 @@ def install_from_conf(
 
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
-    global_agents: set[str] = {a.name for a in conf.agents if a.scope == "global" and not a.disable}
-    # Built-in/profile skills with an explicit scope="project" in [[skills]] — kept at project level.
-    # All other built-in/profile skills default to global (~/.claude/skills/).
-    project_scoped_skills: set[str] = {
-        s.name for s in conf.skills
-        if s.source in ("tamago", "profile") and s.scope == "project" and not s.disable
-    }
+
+    # Two-tier model: everything in the project conf is always project-scoped.
+    # scope="global" no longer has any effect in the project conf — warn and ignore.
+    for _a in conf.agents:
+        if not _a.disable and _a.scope == "global":
+            print(
+                f"warning scope=\"global\" on agent '{_a.name}' in project tamago.conf is "
+                f"ignored — declare it in ~/.tamago/tamago.conf instead",
+                file=sys.stderr,
+            )
+    for _s in conf.skills:
+        if not _s.disable and _s.source in ("tamago", "profile") and _s.scope == "global":
+            print(
+                f"warning scope=\"global\" on skill '{_s.name}' in project tamago.conf is "
+                f"ignored — declare it in ~/.tamago/tamago.conf instead",
+                file=sys.stderr,
+            )
+
     # Agent name for default-agent pointer: first non-disabled agent in conf.
     agent_name: str | None = next(
         (a.name for a in conf.agents if not a.disable),
@@ -2533,8 +2544,7 @@ def install_from_conf(
         tts_enabled=tts_enabled,
         disabled_skills=disabled_skills,
         disabled_agents=disabled_agents,
-        global_agents=global_agents,
-        project_scoped_skills=project_scoped_skills,
+        install_globally=False,
         agent_name=agent_name,
     )
     if rc != 0:
@@ -2704,7 +2714,6 @@ def install_global_from_conf(
     # ── Derive install params ─────────────────────────────────────────────────
     # In the global conf, ALL items are global-scoped (tier determines scope).
     disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
-    all_agents: set[str] = {a.name for a in conf.agents if not a.disable}
     disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
     tts_enabled = True
     for a in conf.agents:
@@ -2716,8 +2725,8 @@ def install_global_from_conf(
     )
 
     # CONVENTIONAL_ROOT (~/.tamago) is used as stand-in project_root.
-    # setup_agents/setup_skills route to ~/.claude/ whenever global_agents/has_global_agent
-    # is set, so they never write under ~/.tamago/.claude/ in practice.
+    # With install_globally=True, setup_agents/setup_skills route to ~/.claude/ so
+    # they never write under ~/.tamago/.claude/ in practice.
     global_root = CONVENTIONAL_ROOT
 
     # ── Agents ────────────────────────────────────────────────────────────────
@@ -2726,7 +2735,7 @@ def install_global_from_conf(
             operation, source_root, global_root, profile_root,
             tts_enabled=tts_enabled,
             disabled_agents=disabled_agents,
-            global_agents=all_agents,
+            install_globally=True,
         )
     except Exception as e:
         print(e, file=sys.stderr)
@@ -2737,8 +2746,7 @@ def install_global_from_conf(
         setup_skills(
             operation, source_root, global_root, profile_root,
             disabled_skills=disabled_skills,
-            project_scoped_skills=set(),  # no project-scoped skills from global conf
-            has_global_agent=True,         # all skills go to ~/.claude/skills/
+            install_globally=True,
         )
     except Exception as e:
         print(e, file=sys.stderr)
