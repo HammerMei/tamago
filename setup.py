@@ -2467,19 +2467,30 @@ def install_from_conf(
                     print(f"info    using profile from machine.toml: {profile_root}")
                     break
 
-    # Resolve profile from conf if not already found via machine.toml.
-    if profile_root is None and conf.profiles:
-        p = conf.profiles[0]
-        try:
-            profile_root = resolve_profile_root(
-                source_root,
-                profile_dir=None,
-                profile_repo=p.repo,
-                profile_name=p.name,
-            )
-        except ValueError as e:
-            print(e, file=sys.stderr)
-            return 1
+    # Resolve profile: project conf takes precedence; global conf is the fallback.
+    # This lets a single [[profiles]] entry in ~/.tamago/tamago.conf serve all projects
+    # without repeating it in every project conf.
+    if profile_root is None:
+        if conf.profiles:
+            profile_entry = conf.profiles[0]
+        elif global_conf is not None and global_conf.profiles:
+            profile_entry = global_conf.profiles[0]
+            label = profile_entry.name or profile_entry.repo or "default"
+            print(f"info    using profile from global tamago.conf: {label}")
+        else:
+            profile_entry = None
+
+        if profile_entry is not None:
+            try:
+                profile_root = resolve_profile_root(
+                    source_root,
+                    profile_dir=None,
+                    profile_repo=profile_entry.repo,
+                    profile_name=profile_entry.name,
+                )
+            except ValueError as e:
+                print(e, file=sys.stderr)
+                return 1
 
     # Derive tts_enabled: first [[agents]] entry with source="profile" wins.
     # tamago-built-in agents don't generate TTS sections regardless.

@@ -2314,6 +2314,116 @@ name = "edm_mei"
                                     )
         self.assertEqual(rc, 0)
 
+    # ── Profile inheritance from global conf ─────────────────────────────────
+
+    def test_project_conf_profile_takes_precedence_over_global(self):
+        """When project conf has [[profiles]], it wins over global conf profile."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile_p = root / "project-profile"
+            profile_g = root / "global-profile"
+            project = root / "project"
+            project.mkdir()
+            source = root / "source"
+            source.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            conf_path.write_text(
+                '[[profiles]]\nrepo = "/fake/project-profile"\n'
+                '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
+            )
+            global_conf = root / "global.conf"
+            global_conf.write_text('[[profiles]]\nrepo = "/fake/global-profile"\n')
+
+            resolve_mock = mock.Mock(return_value=profile_p)
+            with (
+                mock.patch.object(sm, "run_health_check"),
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_write_install_machine_toml"),
+                mock.patch.object(sm, "add_project_to_registry"),
+                mock.patch.object(sm, "resolve_profile_root", resolve_mock),
+            ):
+                sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL, source, project,
+                    global_conf_path=global_conf,
+                )
+            # resolve_profile_root must have been called with the PROJECT profile repo
+            _, resolve_kwargs = resolve_mock.call_args
+            self.assertEqual(resolve_kwargs.get("profile_repo"), "/fake/project-profile")
+            # setup() must have received profile_p as profile_root
+            _, kwargs = mock_setup.call_args
+            self.assertEqual(kwargs["profile_root"], profile_p)
+
+    def test_project_conf_inherits_profile_from_global_when_absent(self):
+        """When project conf has no [[profiles]], the global conf profile is used."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile_g = root / "global-profile"
+            project = root / "project"
+            project.mkdir()
+            source = root / "source"
+            source.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            # No [[profiles]] — agent only
+            conf_path.write_text('[[agents]]\nname = "hammer.mei"\nsource = "profile"\n')
+
+            global_conf = root / "global.conf"
+            global_conf.write_text('[[profiles]]\nrepo = "/fake/global-profile"\n')
+
+            with (
+                mock.patch.object(sm, "run_health_check"),
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_write_install_machine_toml"),
+                mock.patch.object(sm, "add_project_to_registry"),
+                mock.patch.object(sm, "resolve_profile_root", return_value=profile_g),
+            ):
+                rc = sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL, source, project,
+                    global_conf_path=global_conf,
+                )
+            self.assertEqual(rc, 0)
+            _, kwargs = mock_setup.call_args
+            self.assertEqual(kwargs["profile_root"], profile_g)
+
+    def test_no_profile_anywhere_passes_none(self):
+        """No [[profiles]] in either conf → profile_root=None forwarded to setup()."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            project.mkdir()
+            source = root / "source"
+            source.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            conf_path.write_text('[[agents]]\nname = "my-agent"\nsource = "tamago"\n')
+
+            global_conf = root / "global.conf"
+            global_conf.write_text("# no profiles\n")
+
+            with (
+                mock.patch.object(sm, "run_health_check"),
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_write_install_machine_toml"),
+                mock.patch.object(sm, "add_project_to_registry"),
+            ):
+                rc = sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL, source, project,
+                    global_conf_path=global_conf,
+                )
+            self.assertEqual(rc, 0)
+            _, kwargs = mock_setup.call_args
+            self.assertIsNone(kwargs["profile_root"])
+
 
 class SkillRepoCacheTests(unittest.TestCase):
     """Tests for _skill_repo_cache_dir and _clone_or_reuse_skill_repo."""
