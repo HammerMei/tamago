@@ -271,7 +271,7 @@ elif [ -n "$AGENT_NAME" ]; then
     && pass "memory dir" "$AGENT_NAME/" \
     || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/$AGENT_NAME"
 else
-  warn "memory dir" "no agent name in tamago.conf — skipping"
+  pass "memory dir" "no agent in tamago.conf — skipping"
 fi
 
 # ─── 3. Global Settings (patch+merge — not symlinks) ─────────────────────────
@@ -446,7 +446,7 @@ PY
       check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
     fi
   else
-    warn "agent symlinks" "no agent name in tamago.conf — skipping"
+    pass "agent symlinks" "no agent in tamago.conf — skipping"
   fi
 else
   warn "project dir" "not found: $PROJECT_DIR — skipping symlink checks"
