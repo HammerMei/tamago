@@ -83,8 +83,7 @@ agents = conf.get('agents', [])
 if agents:
     a = agents[0]
     print(a.get('name', ''), a.get('scope', 'project'), str(a.get('disable', False)).lower())
-else:
-    print('', 'project', 'false')
+# else: print nothing — no agents configured; AGENT_NAME stays empty
 PY
   ) || _agent_out=""
   if [ -n "$_agent_out" ]; then
