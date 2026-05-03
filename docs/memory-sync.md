@@ -105,7 +105,16 @@ The legacy env var `LAOMEI_MEMORY_SYNC=0` also works for backward compatibility.
 
 ---
 
-## Multi-Agent Support ("全家桶")
+## Multi-Agent Support ("全家桶" — Family Bucket)
+
+> 🪣 Like the KFC 炸雞 bucket that feeds the whole family, this mode packs all your agents
+> into one repo.
+>
+> | EN | ZH | JA |
+> |----|----|----|
+> | *Family Bucket* — everything in one bucket, hot and ready | 全家桶 — 肯德基炸雞全家桶，一桶搞定全家 | ファミリーバーレル — KFC の桶みたいに、エージェントをまとめて一箱 |
+>
+> *Chickens lay eggs. Tamago (たまご) approves. 🥚🐔*
 
 You can install multiple agents in a single repo by adding multiple `[[agents]]` blocks
 to your project `tamago.conf`:

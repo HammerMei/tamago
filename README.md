@@ -132,7 +132,8 @@ source = "profile"
 tts    = true
 memory = true
 
-# Multiple agents in one repo — "全家桶" mode
+# Multiple agents in one repo — "全家桶" (Family Bucket / 全家桶 / ファミリーバーレル)
+# Like a KFC 炸雞 Family Bucket, but for agents. Tamago 🥚 approves.
 # [[agents]]
 # name   = "wave.bro"
 # source = "profile"
