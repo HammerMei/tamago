@@ -46,7 +46,15 @@ fi
 if [ -z "$PROFILE_REPO" ]; then
     exit 0
 fi
-MEMORY_REPO="$PROFILE_REPO"
+
+# Build ALL_PROFILE_REPOS from PROFILE_REPOS (multi-profile) or fall back to PROFILE_REPO.
+if [ -n "${PROFILE_REPOS:-}" ]; then
+  ALL_PROFILE_REPOS="$PROFILE_REPOS"
+elif [ -n "${PROFILE_REPO:-}" ]; then
+  ALL_PROFILE_REPOS="$PROFILE_REPO"
+else
+  exit 0
+fi
 
 # Sync disabled — env var (LAOMEI_MEMORY_SYNC=0) or tamago.conf (MEMORY_SYNC=0)
 if [ "${LAOMEI_MEMORY_SYNC:-1}" = "0" ] || [ "${MEMORY_SYNC:-1}" = "0" ]; then
@@ -56,24 +64,6 @@ fi
 case "$1" in
   --init)
     HOSTNAME=$(hostname)
-
-    # Determine the list of agents to init.
-    # Priority: AGENT_NAMES (multi-agent list) > AGENT_NAME (legacy single) > settings.json.
-    if [ -n "$AGENT_NAMES" ]; then
-      INIT_AGENTS="$AGENT_NAMES"
-    elif [ -n "$AGENT_NAME" ]; then
-      INIT_AGENTS="$AGENT_NAME"
-    else
-      AGENT_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
-      if [ -f "$AGENT_SETTINGS" ]; then
-        INIT_AGENTS=$(python3 -c "
-import json, sys
-print(json.load(open(sys.argv[1])).get('agent', 'hammer.mei'))
-" "$AGENT_SETTINGS" 2>/dev/null || echo "hammer.mei")
-      else
-        INIT_AGENTS="hammer.mei"
-      fi
-    fi
 
     # 2. Harness — use explicit argument if provided, otherwise best-effort detect
     if [ -n "$2" ]; then
@@ -86,82 +76,109 @@ print(json.load(open(sys.argv[1])).get('agent', 'hammer.mei'))
       HARNESS="unknown"
     fi
 
-    # 3. Detect model (best effort — check profile settings first, then tamago common)
-    PROFILE_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
-    COMMON_SETTINGS="$REPO/settings/claude/settings.json"
-    if [ -f "$PROFILE_SETTINGS" ]; then
-      MODEL=$(python3 -c "
+    for PROFILE_REPO_ITEM in $ALL_PROFILE_REPOS; do
+      MEMORY_REPO="$PROFILE_REPO_ITEM"
+
+      # Determine the list of agents to init for this profile.
+      # Priority: AGENT_NAMES (multi-agent list) > AGENT_NAME (legacy single) > settings.json.
+      if [ -n "$AGENT_NAMES" ]; then
+        INIT_AGENTS="$AGENT_NAMES"
+      elif [ -n "$AGENT_NAME" ]; then
+        INIT_AGENTS="$AGENT_NAME"
+      else
+        AGENT_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
+        if [ -f "$AGENT_SETTINGS" ]; then
+          INIT_AGENTS=$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1])).get('agent', 'hammer.mei'))
+" "$AGENT_SETTINGS" 2>/dev/null || echo "hammer.mei")
+        else
+          INIT_AGENTS="hammer.mei"
+        fi
+      fi
+
+      # 3. Detect model (best effort — check profile settings first, then tamago common)
+      PROFILE_SETTINGS="$MEMORY_REPO/settings/claude/settings.json"
+      COMMON_SETTINGS="$REPO/settings/claude/settings.json"
+      if [ -f "$PROFILE_SETTINGS" ]; then
+        MODEL=$(python3 -c "
 import json, sys
 print(json.load(open(sys.argv[1])).get('defaultModel', 'unknown'))
 " "$PROFILE_SETTINGS" 2>/dev/null || echo "unknown")
-    elif [ -f "$COMMON_SETTINGS" ]; then
-      MODEL=$(python3 -c "
+      elif [ -f "$COMMON_SETTINGS" ]; then
+        MODEL=$(python3 -c "
 import json, sys
 print(json.load(open(sys.argv[1])).get('defaultModel', 'unknown'))
 " "$COMMON_SETTINGS" 2>/dev/null || echo "unknown")
-    else
-      MODEL="unknown"
-    fi
-
-    # 4. Init env dir + visited.md for each agent; commit once at the end.
-    NEEDS_COMMIT=false
-    for AGENT in $INIT_AGENTS; do
-      ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/$AGENT/env-$HOSTNAME"
-
-      # Ensure env dir exists
-      if [ ! -d "$ENV_DIR" ]; then
-        mkdir -p "$ENV_DIR"
-        printf "# Environment Memory — %s\n\n首次見面：%s\n" "$HOSTNAME" "$(date +%Y-%m-%d)" > "$ENV_DIR/MEMORY.md"
-        NEEDS_COMMIT=true
+      else
+        MODEL="unknown"
       fi
 
-      # Append to visited.md only if harness+model changed
-      VISITED="$ENV_DIR/visited.md"
-      LAST=$(tail -1 "$VISITED" 2>/dev/null || echo "")
-      if ! echo "$LAST" | grep -q "| $HARNESS | $MODEL"; then
-        if [ ! -f "$VISITED" ]; then
-          printf "# Visited Log — %s\n\nRecords when harness or model changes. Append-only.\nFormat: \`- {YYYY-MM-DD} | {harness} | {model}\`\n\n" "$HOSTNAME" > "$VISITED"
+      # 4. Init env dir + visited.md for each agent; commit once at the end.
+      NEEDS_COMMIT=false
+      for AGENT in $INIT_AGENTS; do
+        ENV_DIR="$MEMORY_REPO/$MEMORY_PATH/$AGENT/env-$HOSTNAME"
+
+        # Ensure env dir exists
+        if [ ! -d "$ENV_DIR" ]; then
+          mkdir -p "$ENV_DIR"
+          printf "# Environment Memory — %s\n\n首次見面：%s\n" "$HOSTNAME" "$(date +%Y-%m-%d)" > "$ENV_DIR/MEMORY.md"
+          NEEDS_COMMIT=true
         fi
-        printf -- "- %s | %s | %s\n" "$(date +%Y-%m-%d)" "$HARNESS" "$MODEL" >> "$VISITED"
-        NEEDS_COMMIT=true
+
+        # Append to visited.md only if harness+model changed
+        VISITED="$ENV_DIR/visited.md"
+        LAST=$(tail -1 "$VISITED" 2>/dev/null || echo "")
+        if ! echo "$LAST" | grep -q "| $HARNESS | $MODEL"; then
+          if [ ! -f "$VISITED" ]; then
+            printf "# Visited Log — %s\n\nRecords when harness or model changes. Append-only.\nFormat: \`- {YYYY-MM-DD} | {harness} | {model}\`\n\n" "$HOSTNAME" > "$VISITED"
+          fi
+          printf -- "- %s | %s | %s\n" "$(date +%Y-%m-%d)" "$HARNESS" "$MODEL" >> "$VISITED"
+          NEEDS_COMMIT=true
+        fi
+      done
+
+      # 5. Commit + push immediately so UserPromptSubmit pull sees a clean working tree
+      if [ "$NEEDS_COMMIT" = true ]; then
+        cd "$MEMORY_REPO" && \
+          git add "$MEMORY_PATH" && \
+          git commit -m "auto: session init footprint" --quiet && \
+          (git pull --rebase --quiet && git push --quiet) 2>/dev/null || true
       fi
     done
-
-    # 5. Commit + push immediately so UserPromptSubmit pull sees a clean working tree
-    if [ "$NEEDS_COMMIT" = true ]; then
-      cd "$MEMORY_REPO" && \
-        git add "$MEMORY_PATH" && \
-        git commit -m "auto: session init footprint" --quiet && \
-        (git pull --rebase --quiet && git push --quiet) 2>/dev/null || true
-    fi
     ;;
 
   --pull)
-    # Skip if no remote is configured
-    git -C "$MEMORY_REPO" remote get-url origin &>/dev/null || exit 0
-    # Pull latest memory; surface warning to both Claude context and CLI on failure
-    if ! (cd "$MEMORY_REPO" && timeout 5 git pull --rebase --quiet) 2>/dev/null; then
-      echo "Memory sync warning: git pull failed — you may be out of sync with other 分身. Consider running 'git pull --rebase' in $MEMORY_REPO manually."
-    fi
+    for PROFILE_REPO_ITEM in $ALL_PROFILE_REPOS; do
+      MEMORY_REPO="$PROFILE_REPO_ITEM"
+      # Skip if no remote is configured
+      git -C "$MEMORY_REPO" remote get-url origin &>/dev/null || continue
+      # Pull latest memory; surface warning to both Claude context and CLI on failure
+      if ! (cd "$MEMORY_REPO" && timeout 5 git pull --rebase --quiet) 2>/dev/null; then
+        echo "Memory sync warning: git pull failed — you may be out of sync with other 分身. Consider running 'git pull --rebase' in $MEMORY_REPO manually."
+      fi
+    done
     ;;
 
   --push)
-    cd "$MEMORY_REPO" || exit 0
+    for PROFILE_REPO_ITEM in $ALL_PROFILE_REPOS; do
+      cd "$PROFILE_REPO_ITEM" || continue
 
-    # Nothing to sync
-    git diff --quiet "$MEMORY_PATH" 2>/dev/null && exit 0
+      # Nothing to sync
+      git diff --quiet "$MEMORY_PATH" 2>/dev/null && continue
 
-    # Commit local changes
-    git add "$MEMORY_PATH" && \
-      git commit -m "auto: sync memory on turn end" --quiet || exit 0
+      # Commit local changes
+      git add "$MEMORY_PATH" && \
+        git commit -m "auto: sync memory on turn end" --quiet || continue
 
-    # Skip push if no remote is configured (commit is kept locally)
-    git remote get-url origin &>/dev/null || exit 0
+      # Skip push if no remote is configured (commit is kept locally)
+      git remote get-url origin &>/dev/null || continue
 
-    # Pull --rebase then push; surface systemMessage to user on failure
-    if ! (git pull --rebase --quiet && git push --quiet) 2>/dev/null; then
-      printf '{"systemMessage": "⚠️ Memory sync failed: push rejected. Run: cd %s && git pull --rebase && git push"}\n' "$MEMORY_REPO"
-    fi
+      # Pull --rebase then push; surface systemMessage to user on failure
+      if ! (git pull --rebase --quiet && git push --quiet) 2>/dev/null; then
+        printf '{"systemMessage": "⚠️ Memory sync failed: push rejected. Run: cd %s && git pull --rebase && git push"}\n' "$PROFILE_REPO_ITEM"
+      fi
+    done
     ;;
 
   *)

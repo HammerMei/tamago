@@ -985,6 +985,41 @@ class MachineEnvTests(unittest.TestCase):
             content = env_path.read_text()
             self.assertIn("AGENT_NAMES='hammer.mei'", content)
 
+    def test_writes_profile_repos_for_multi_profile(self):
+        """PROFILE_REPOS line written with space-separated paths when profile_repos provided."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_a = Path(td) / "profile-a"
+            profile_b = Path(td) / "profile-b"
+            profile_a.mkdir()
+            profile_b.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            sm.write_machine_env(
+                env_path, profile_a, "hammer.mei",
+                profile_repos=[profile_a, profile_b],
+            )
+
+            content = env_path.read_text()
+            self.assertIn("PROFILE_REPOS=", content)
+            # Both paths present in PROFILE_REPOS
+            self.assertIn(str(profile_a.resolve()), content)
+            self.assertIn(str(profile_b.resolve()), content)
+            # Backward-compat PROFILE_REPO still points to the first profile
+            self.assertIn(f"PROFILE_REPO='{profile_a.resolve()}'", content)
+
+    def test_profile_repos_falls_back_to_profile_repo_when_not_provided(self):
+        """PROFILE_REPOS equals PROFILE_REPO value when profile_repos not given."""
+        with tempfile.TemporaryDirectory() as td:
+            profile_repo = Path(td) / "my-profile"
+            profile_repo.mkdir()
+            env_path = Path(td) / ".tamago" / "machine.env"
+
+            sm.write_machine_env(env_path, profile_repo, "hammer.mei")
+
+            content = env_path.read_text()
+            resolved = str(profile_repo.resolve())
+            self.assertIn(f"PROFILE_REPOS='{resolved}'", content)
+
 
 class GlobalMachineEnvTests(unittest.TestCase):
     """Tests for ~/.tamago/machine.env written by setup() when install_globally=True."""
@@ -2102,6 +2137,8 @@ class InstallFromConfTests(unittest.TestCase):
         """First profile agent with tts=false → setup receives tts_enabled=False."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             self._write_toml(conf_path, """
 [[agents]]
 name = "hammer.mei"
@@ -2117,6 +2154,7 @@ tts = false
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             self.assertFalse(mock_setup.call_args.kwargs["tts_enabled"])
@@ -5007,6 +5045,8 @@ class DisableAgentTests(unittest.TestCase):
         """install_from_conf collects all non-disabled agents and passes agent_names to setup."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             conf_path.write_text(
                 '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
                 '[[agents]]\nname = "wave.bro"\nsource = "profile"\n'
@@ -5032,6 +5072,7 @@ class DisableAgentTests(unittest.TestCase):
                     Path(td) / "source",
                     project_root,
                     registry_path=registry,
+                    global_conf_path=empty_global,
                 )
 
             # First non-disabled agent is the default-agent pointer
@@ -5058,6 +5099,9 @@ class DisableAgentTests(unittest.TestCase):
             (profile / "settings" / "opencode").mkdir(parents=True)
             (profile / "settings" / "claude" / "settings.json").write_text('{"agent": "hammer.mei"}')
 
+            empty_global = root / "global.conf"
+            empty_global.write_text("# empty\n")
+
             conf_path = root / "project" / ".tamago" / "tamago.conf"
             conf_path.parent.mkdir(parents=True)
             conf_path.write_text(
@@ -5079,6 +5123,7 @@ class DisableAgentTests(unittest.TestCase):
                     source,
                     project_root,
                     registry_path=registry,
+                    global_conf_path=empty_global,
                 )
 
             machine_env = project_root / ".tamago" / "machine.env"
@@ -5580,13 +5625,32 @@ class InstallGlobalFromConfTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
 
-    def test_multiple_profiles_returns_1(self):
-        """Global conf with more than one [[profiles]] entry is rejected."""
+    def test_multiple_profiles_each_calls_setup_agents(self):
+        """Global conf with multiple [[profiles]] entries calls setup_agents once per profile."""
         with tempfile.TemporaryDirectory() as td:
+            profile_a = Path(td) / "profile-a"
+            profile_b = Path(td) / "profile-b"
+            profile_a.mkdir()
+            profile_b.mkdir()
+
             conf = Path(td) / "tamago.conf"
-            conf.write_text('[[profiles]]\nname = "a"\n[[profiles]]\nname = "b"\n')
-            rc, _ = self._run(conf, sm.Operation.INSTALL, Path(td))
-        self.assertEqual(rc, 1)
+            conf.write_text(
+                '[[profiles]]\nname = "profile-a"\n\n[[profiles]]\nname = "profile-b"\n'
+            )
+
+            resolved = [profile_a, profile_b]
+            patches = self._all_mocks(
+                resolve_profile_root=mock.Mock(side_effect=resolved),
+            )
+            rc, patches = self._run(conf, sm.Operation.INSTALL, Path(td), patches=patches)
+
+        self.assertEqual(rc, 0)
+        # setup_agents called twice — once per profile
+        self.assertEqual(patches["setup_agents"].call_count, 2)
+        # Both profiles passed as positional arg index 3
+        call_profiles = [c[0][3] for c in patches["setup_agents"].call_args_list]
+        self.assertIn(profile_a, call_profiles)
+        self.assertIn(profile_b, call_profiles)
 
     def test_conf_with_plugin_calls_setup_plugins(self):
         """A [[plugins]] entry causes setup_plugins to be called with the plugin."""

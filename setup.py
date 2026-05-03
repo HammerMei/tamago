@@ -455,6 +455,7 @@ def write_machine_env(
     memory_sync: bool = True,
     tts_enabled: bool = True,
     agent_names: "list[str] | None" = None,
+    profile_repos: "list[Path] | None" = None,
 ) -> None:
     """Write (or remove) .tamago/machine.env — a shell-sourceable KEY=VALUE bridge.
 
@@ -466,6 +467,10 @@ def write_machine_env(
     agent_names: full list of non-disabled agent names (multi-agent support).
       Written as AGENT_NAMES='name1 name2 ...' — memory-sync.sh loops over this.
       Falls back to [agent_name] when not provided (backward compat).
+
+    profile_repos: all resolved profile roots (multi-profile support).
+      Written as PROFILE_REPOS='path1 path2 ...' — memory-sync.sh loops over this.
+      Falls back to single PROFILE_REPO value when not provided or empty.
     """
     if profile_repo is None:
         if path.exists():
@@ -475,8 +480,15 @@ def write_machine_env(
     # AGENT_NAMES: space-separated list for memory-sync.sh to iterate over.
     # If agent_names list not provided, fall back to single agent_name for compat.
     names_str = " ".join(agent_names) if agent_names else (agent_name or "")
+    # PROFILE_REPOS: space-separated list of all profile root paths.
+    # Falls back to the single PROFILE_REPO value when not provided or empty.
+    if profile_repos:
+        repos_str = " ".join(str(p.resolve()) for p in profile_repos)
+    else:
+        repos_str = str(profile_repo.resolve())
     lines = [
         f"PROFILE_REPO={_shell_quote_value(str(profile_repo.resolve()))}",
+        f"PROFILE_REPOS={_shell_quote_value(repos_str)}",
         f"AGENT_NAME={_shell_quote_value(agent_name or '')}",
         f"AGENT_NAMES={_shell_quote_value(names_str)}",
         f"MEMORY_SYNC={1 if memory_sync else 0}",
@@ -2342,15 +2354,24 @@ def _write_install_machine_toml(
     conf: "TamagoConf",
     profile_root: "Path | None",
     cache_root: Path,
+    profile_roots: "list[Path] | None" = None,
 ) -> None:
     """Build and write machine.toml from the resolved install state.
 
     Called by install_from_conf AFTER setup() succeeds but BEFORE
     setup_external_skills() so the profile path is always recorded
     even if a URL-skill clone fails.
+
+    profile_roots: when provided (multi-profile), all resolved profile roots are
+      recorded using zip(conf.profiles, profile_roots).  Falls back to the legacy
+      single profile_root / conf.profiles[0] path when not provided.
     """
     profiles: dict[str, str] = {}
-    if profile_root is not None and conf.profiles:
+    if profile_roots is not None:
+        for p, root in zip(conf.profiles, profile_roots):
+            key = p.name or (_repo_name_from_url(p.repo) if p.repo else "default")
+            profiles[key] = str(root.resolve())
+    elif profile_root is not None and conf.profiles:
         p = conf.profiles[0]
         key = p.name or (_repo_name_from_url(p.repo) if p.repo else "default")
         profiles[key] = str(profile_root.resolve())
@@ -2450,11 +2471,11 @@ def install_from_conf(
         print(f"error   could not parse tamago.conf: {conf_path}", file=sys.stderr)
         return 1
 
-    # Guard: spec says "only one [[profiles]] entry for now".
+    # Guard: project conf supports only one [[profiles]] entry.
     if len(conf.profiles) > 1:
         print(
             f"error   tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
-            f"only one is supported in this version",
+            f"only one is supported in project conf — for multiple profiles, declare them in ~/.tamago/tamago.conf",
             file=sys.stderr,
         )
         return 1
@@ -2676,17 +2697,8 @@ def install_global_from_conf(
         # Missing file: infra already ran, nothing more to do.
         return 1 if errors else 0
 
-    # Guard: only one [[profiles]] entry supported
-    if len(conf.profiles) > 1:
-        print(
-            f"error   global tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
-            f"only one is supported in this version",
-            file=sys.stderr,
-        )
-        return 1
-
-    # ── Resolve profile ───────────────────────────────────────────────────────
-    profile_root: Path | None = None
+    # ── Resolve profiles ──────────────────────────────────────────────────────
+    profile_roots: list[Path] = []
 
     if operation == Operation.UNINSTALL:
         machine_data = load_machine_toml(GLOBAL_MACHINE_TOML_PATH)
@@ -2694,22 +2706,24 @@ def install_global_from_conf(
             for path_str in machine_data.profiles.values():
                 candidate = Path(path_str)
                 if candidate.is_dir():
-                    profile_root = candidate
-                    print(f"info    using profile from global machine.toml: {profile_root}")
-                    break
+                    profile_roots.append(candidate)
+                    print(f"info    using profile from global machine.toml: {candidate}")
 
-    if profile_root is None and conf.profiles:
-        p = conf.profiles[0]
-        try:
-            profile_root = resolve_profile_root(
-                source_root,
-                profile_dir=None,
-                profile_repo=p.repo,
-                profile_name=p.name,
-            )
-        except ValueError as e:
-            print(e, file=sys.stderr)
-            return 1
+    if not profile_roots and conf.profiles:
+        for p in conf.profiles:
+            try:
+                resolved = resolve_profile_root(
+                    source_root,
+                    profile_dir=None,
+                    profile_repo=p.repo,
+                    profile_name=p.name,
+                )
+                profile_roots.append(resolved)
+            except ValueError as e:
+                print(e, file=sys.stderr)
+                return 1
+
+    profile_root = profile_roots[0] if profile_roots else None
 
     # ── Pull repos (on 'tamago update' only) ──────────────────────────────────
     if operation == Operation.INSTALL and pull_cached_skills:
@@ -2735,29 +2749,36 @@ def install_global_from_conf(
     global_root = CONVENTIONAL_ROOT
 
     # ── Agents ────────────────────────────────────────────────────────────────
-    try:
-        setup_agents(
-            operation, source_root, global_root, profile_root,
-            tts_enabled=tts_enabled,
-            disabled_agents=disabled_agents,
-            install_globally=True,
-        )
-    except Exception as e:
-        print(e, file=sys.stderr)
-        errors.append(str(e))
+    # Loop over all profiles; when none are defined, call once with pr=None so
+    # tamago built-in agents (source="tamago") still get installed.
+    for pr in (profile_roots or [None]):
+        try:
+            setup_agents(
+                operation, source_root, global_root, pr,
+                tts_enabled=tts_enabled,
+                disabled_agents=disabled_agents,
+                install_globally=True,
+            )
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
 
     # ── Skills (built-in + profile) ───────────────────────────────────────────
-    try:
-        setup_skills(
-            operation, source_root, global_root, profile_root,
-            disabled_skills=disabled_skills,
-            install_globally=True,
-        )
-    except Exception as e:
-        print(e, file=sys.stderr)
-        errors.append(str(e))
+    # Loop over all profiles; same fallback-to-None logic as agents above.
+    for pr in (profile_roots or [None]):
+        try:
+            setup_skills(
+                operation, source_root, global_root, pr,
+                disabled_skills=disabled_skills,
+                install_globally=True,
+            )
+        except Exception as e:
+            print(e, file=sys.stderr)
+            errors.append(str(e))
 
     # ── Agent settings (default-agent pointer + profile overrides) ────────────
+    # Uses only the first profile (profile_root) — settings merges a single
+    # default-agent pointer and only the first profile's overrides are needed.
     try:
         setup_settings(
             operation, source_root, global_root, profile_root,
@@ -2776,6 +2797,7 @@ def install_global_from_conf(
                 global_machine_env, profile_root, agent_name,
                 conf.memory_sync, tts_enabled,
                 agent_names=agent_names,
+                profile_repos=profile_roots if profile_roots else None,
             )
         except Exception as e:
             print(e, file=sys.stderr)
@@ -2801,7 +2823,8 @@ def install_global_from_conf(
 
     # ── Write/remove global machine.toml ──────────────────────────────────────
     if operation == Operation.INSTALL:
-        _write_install_machine_toml(GLOBAL_MACHINE_TOML_PATH, conf, profile_root, cache_root)
+        _write_install_machine_toml(GLOBAL_MACHINE_TOML_PATH, conf, profile_root, cache_root,
+                                    profile_roots=profile_roots if profile_roots else None)
     elif operation == Operation.UNINSTALL:
         if GLOBAL_MACHINE_TOML_PATH.exists():
             GLOBAL_MACHINE_TOML_PATH.unlink()
