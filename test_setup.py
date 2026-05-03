@@ -2183,55 +2183,6 @@ tts = false
             # tts_enabled defaults to True because no profile agent was specified
             self.assertTrue(mock_setup.call_args.kwargs["tts_enabled"])
 
-    def test_profile_name_resolved_and_passed_to_setup(self):
-        """[[profiles]] name= → resolve_profile_root called → profile_root passed to setup."""
-        with tempfile.TemporaryDirectory() as td:
-            source = Path(td) / "tamago"
-            source.mkdir()
-            profile = source / "hammer.mei-profile"
-            profile.mkdir()
-            conventional = Path(td) / "fake-tamago"  # no profiles here
-
-            conf_path = Path(td) / "tamago.conf"
-            conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
-
-            with (
-                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
-                mock.patch.object(sm, "pull_repo"),
-                mock.patch.object(sm, "CONVENTIONAL_ROOT", conventional),
-            ):
-                result = sm.install_from_conf(
-                    conf_path,
-                    sm.Operation.INSTALL,
-                    source,
-                    Path(td) / "project",
-                )
-
-            self.assertEqual(result, 0)
-            self.assertEqual(mock_setup.call_args.kwargs["profile_root"], profile)
-
-    def test_multiple_profiles_returns_error(self):
-        """More than one [[profiles]] entry is unsupported — must return 1."""
-        with tempfile.TemporaryDirectory() as td:
-            conf_path = Path(td) / "tamago.conf"
-            self._write_toml(conf_path, """
-[[profiles]]
-name = "hammer.mei"
-
-[[profiles]]
-name = "edm_mei"
-""")
-            stderr = io.StringIO()
-            with mock.patch.object(sm.sys, "stderr", stderr):
-                result = sm.install_from_conf(
-                    conf_path,
-                    sm.Operation.INSTALL,
-                    Path(td) / "source",
-                    Path(td) / "project",
-                )
-            self.assertEqual(result, 1)
-            self.assertIn("2 [[profiles]]", stderr.getvalue())
-
     def test_no_pull_on_uninstall(self):
         """pull_repo must NOT be called during uninstall."""
         with tempfile.TemporaryDirectory() as td:
@@ -2430,49 +2381,8 @@ name = "edm_mei"
 
     # ── Profile inheritance from global conf ─────────────────────────────────
 
-    def test_project_conf_profile_takes_precedence_over_global(self):
-        """When project conf has [[profiles]], it wins over global conf profile."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            profile_p = root / "project-profile"
-            profile_g = root / "global-profile"
-            project = root / "project"
-            project.mkdir()
-            source = root / "source"
-            source.mkdir()
-
-            conf_path = project / ".tamago" / "tamago.conf"
-            conf_path.parent.mkdir()
-            conf_path.write_text(
-                '[[profiles]]\nrepo = "/fake/project-profile"\n'
-                '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
-            )
-            global_conf = root / "global.conf"
-            global_conf.write_text('[[profiles]]\nrepo = "/fake/global-profile"\n')
-
-            resolve_mock = mock.Mock(return_value=profile_p)
-            with (
-                mock.patch.object(sm, "run_health_check"),
-                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
-                mock.patch.object(sm, "setup_external_skills", return_value=0),
-                mock.patch.object(sm, "setup_plugins", return_value=0),
-                mock.patch.object(sm, "_write_install_machine_toml"),
-                mock.patch.object(sm, "add_project_to_registry"),
-                mock.patch.object(sm, "resolve_profile_root", resolve_mock),
-            ):
-                sm.install_from_conf(
-                    conf_path, sm.Operation.INSTALL, source, project,
-                    global_conf_path=global_conf,
-                )
-            # resolve_profile_root must have been called with the PROJECT profile repo
-            _, resolve_kwargs = resolve_mock.call_args
-            self.assertEqual(resolve_kwargs.get("profile_repo"), "/fake/project-profile")
-            # setup() must have received profile_p as profile_root
-            _, kwargs = mock_setup.call_args
-            self.assertEqual(kwargs["profile_root"], profile_p)
-
-    def test_project_conf_inherits_profile_from_global_when_absent(self):
-        """When project conf has no [[profiles]], the global conf profile is used."""
+    def test_project_install_uses_global_conf_profile(self):
+        """Profile always comes from global conf — project conf does not declare profiles."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             profile_g = root / "global-profile"
@@ -2505,6 +2415,30 @@ name = "edm_mei"
             self.assertEqual(rc, 0)
             _, kwargs = mock_setup.call_args
             self.assertEqual(kwargs["profile_root"], profile_g)
+
+    def test_project_conf_profiles_emit_deprecation_warning(self):
+        """[[profiles]] in project conf emits a deprecation warning but continues."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
+            conf_path.write_text('[[profiles]]\nname = "old-style"\n')
+
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(sm, "setup", return_value=0),
+                mock.patch.object(sm, "pull_repo"),
+                mock.patch.object(sm.sys, "stderr", stderr),
+            ):
+                rc = sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL,
+                    Path(td) / "source", Path(td) / "project",
+                    global_conf_path=empty_global,
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("[[profiles]]", stderr.getvalue())
+            self.assertIn("no longer supported", stderr.getvalue())
 
     def test_no_profile_anywhere_passes_none(self):
         """No [[profiles]] in either conf → profile_root=None forwarded to setup()."""
@@ -3342,20 +3276,20 @@ class InstallFromConfMachineTomlTests(unittest.TestCase):
         return conf_path
 
     def test_machine_toml_written_on_install(self):
-        """install_from_conf writes machine.toml when profile_root is set."""
+        """install_from_conf writes machine.toml on INSTALL; profiles are empty (project conf has none)."""
         with tempfile.TemporaryDirectory() as td:
-            profile_dir = Path(td) / "hammer.mei-profile"
-            profile_dir.mkdir()
-            conf_path = self._make_conf(
-                td,
-                f'[[profiles]]\nname = "hammer.mei"\n',
-            )
+            conf_path = self._make_conf(td)
+            global_conf_path = Path(td) / "global.conf"
+            global_conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
             project_root = Path(td) / "project"
 
             written_data: list[sm.MachineToml] = []
 
             def capture_write(path, data):
                 written_data.append(data)
+
+            profile_dir = Path(td) / "hammer.mei-profile"
+            profile_dir.mkdir()
 
             with (
                 mock.patch.object(sm, "setup", return_value=0),
@@ -3370,13 +3304,14 @@ class InstallFromConfMachineTomlTests(unittest.TestCase):
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     project_root,
+                    global_conf_path=global_conf_path,
                 )
 
             self.assertEqual(result, 0)
             self.assertEqual(len(written_data), 1)
             data = written_data[0]
-            # Profiles dict should have the resolved path
-            self.assertEqual(list(data.profiles.values())[0], str(profile_dir.resolve()))
+            # Project machine.toml has no profiles (profile comes from global conf, not recorded here)
+            self.assertEqual(data.profiles, {})
 
     def test_machine_toml_not_written_on_uninstall(self):
         """install_from_conf never calls write_machine_toml on UNINSTALL."""
@@ -3451,107 +3386,6 @@ class InstallFromConfMachineTomlTests(unittest.TestCase):
 
         self.assertEqual(call_order, ["write_machine_toml", "setup_external_skills"])
 
-    def test_uninstall_uses_machine_toml_when_conf_would_resolve_different_path(self):
-        """The key Slice E test: uninstall reads profile path from machine.toml,
-        not by re-resolving conf.profiles, so it uses the path from install time.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            source_root = Path(td) / "tamago"
-            source_root.mkdir()
-
-            # Profile A — the one installed originally
-            profile_a = source_root / "original-profile"
-            profile_a.mkdir()
-
-            # Profile B — would be resolved if conf is re-parsed (different path)
-            profile_b = source_root / "different-profile"
-            profile_b.mkdir()
-
-            # tamago.conf still says "original" by name
-            conf_path = Path(td) / "tamago.conf"
-            conf_path.write_text('[[profiles]]\nname = "original"\n')
-
-            project_root = Path(td) / "project"
-            machine_toml_path = project_root / ".tamago" / "machine.toml"
-            machine_toml_path.parent.mkdir(parents=True)
-
-            # machine.toml points to profile_a (installed path)
-            sm.write_machine_toml(
-                machine_toml_path,
-                sm.MachineToml(profiles={"original": str(profile_a.resolve())}),
-            )
-
-            # Now change conf to point at profile_b so re-resolution would differ
-            conf_path.write_text('[[profiles]]\nname = "different"\n')
-
-            captured_profile_root: list = []
-
-            def capture_setup(operation, source_root, project_root, **kwargs):
-                captured_profile_root.append(kwargs.get("profile_root"))
-                return 0
-
-            with (
-                mock.patch.object(sm, "setup", side_effect=capture_setup),
-                mock.patch.object(sm, "setup_external_skills", return_value=0),
-                # resolve_profile_root should NOT be called since machine.toml wins
-                mock.patch.object(
-                    sm, "resolve_profile_root",
-                    return_value=profile_b,  # would return wrong path if called
-                ) as mock_resolve,
-            ):
-                result = sm.install_from_conf(
-                    conf_path,
-                    sm.Operation.UNINSTALL,
-                    source_root,
-                    project_root,
-                )
-
-            self.assertEqual(result, 0)
-            # setup() must have received profile_a, not profile_b
-            self.assertEqual(len(captured_profile_root), 1)
-            self.assertEqual(captured_profile_root[0].resolve(), profile_a.resolve())
-            # resolve_profile_root should not have been called (machine.toml was sufficient)
-            mock_resolve.assert_not_called()
-            # machine.toml should be gone after uninstall
-            self.assertFalse(machine_toml_path.exists())
-
-    def test_uninstall_falls_back_to_conf_when_machine_toml_absent(self):
-        """Without machine.toml (pre-Slice-E install), conf.profiles is used."""
-        with tempfile.TemporaryDirectory() as td:
-            source_root = Path(td) / "tamago"
-            source_root.mkdir()
-            profile_dir = source_root / "hammer.mei-profile"
-            profile_dir.mkdir()
-
-            conf_path = Path(td) / "tamago.conf"
-            conf_path.write_text('[[profiles]]\nname = "hammer.mei"\n')
-
-            project_root = Path(td) / "project"
-            # No machine.toml present
-
-            captured_profile_root: list = []
-
-            def capture_setup(operation, source_root, project_root, **kwargs):
-                captured_profile_root.append(kwargs.get("profile_root"))
-                return 0
-
-            with (
-                mock.patch.object(sm, "setup", side_effect=capture_setup),
-                mock.patch.object(sm, "setup_external_skills", return_value=0),
-                mock.patch.object(
-                    sm, "resolve_profile_root",
-                    return_value=profile_dir,
-                ),
-            ):
-                result = sm.install_from_conf(
-                    conf_path,
-                    sm.Operation.UNINSTALL,
-                    source_root,
-                    project_root,
-                )
-
-            self.assertEqual(result, 0)
-            self.assertEqual(captured_profile_root[0], profile_dir)
 
 
 class KnownProjectsRegistryTests(unittest.TestCase):
@@ -5099,20 +4933,19 @@ class DisableAgentTests(unittest.TestCase):
             (profile / "settings" / "opencode").mkdir(parents=True)
             (profile / "settings" / "claude" / "settings.json").write_text('{"agent": "hammer.mei"}')
 
-            empty_global = root / "global.conf"
-            empty_global.write_text("# empty\n")
+            global_conf = root / "global.conf"
+            global_conf.write_text(f'[[profiles]]\nrepo = "{profile}"\n')
 
             conf_path = root / "project" / ".tamago" / "tamago.conf"
             conf_path.parent.mkdir(parents=True)
             conf_path.write_text(
-                f'[[profiles]]\nname = "hammer.mei"\nrepo = "{profile}"\n'
                 '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
                 '[[agents]]\nname = "wave.bro"\nsource = "profile"\n'
             )
             project_root = conf_path.parent.parent
             registry = root / "registry.json"
 
-            # Mock resolve_profile_root so the test doesn't need a real git repo
+            # Profile comes from global conf; resolve_profile_root is mocked.
             with (
                 mock.patch.object(sm, "pull_repo"),
                 mock.patch.object(sm, "resolve_profile_root", return_value=profile),
@@ -5123,7 +4956,7 @@ class DisableAgentTests(unittest.TestCase):
                     source,
                     project_root,
                     registry_path=registry,
-                    global_conf_path=empty_global,
+                    global_conf_path=global_conf,
                 )
 
             machine_env = project_root / ".tamago" / "machine.env"

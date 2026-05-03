@@ -2449,36 +2449,34 @@ def install_from_conf(
     scope) live in tamago.conf rather than CLI flags.
 
     MVP limitations (Slice C/D/E):
-    - Only the first [[profiles]] entry is used; a second one raises an error.
     - tts is derived from the first profile-sourced agent entry; if multiple profile
       agents have conflicting tts values, the first one wins for all of them.
     - [[skills]] with scope=global is the default for built-in/profile skills.
       URL-sourced skills support both scope=global and scope=project.
+    - [[profiles]] must be declared in ~/.tamago/tamago.conf (global conf); project
+      conf does not support [[profiles]] entries.
 
     pull_cached_skills: when True, pull already-cached skill repos before installing
       (used by 'tamago update'; False for plain 'tamago install').
 
     machine.toml (Slice E):
-    - On INSTALL: written after setup() succeeds, recording resolved profile path and
-      skill cache dirs.  Written BEFORE setup_external_skills so the profile is always
-      recorded even if a URL-skill clone fails.
-    - On UNINSTALL: read first to recover the reliably-resolved profile path from the
-      previous install; falls back to conf.profiles re-resolution for pre-Slice-E
-      installs.  Deleted after uninstall completes.
+    - On INSTALL: written after setup() succeeds, recording skill cache dirs.
+      Written BEFORE setup_external_skills so the record is always captured even if
+      a URL-skill clone fails.
+    - On UNINSTALL: deleted after uninstall completes.  Profile path is always
+      re-resolved from global conf (not recorded in project machine.toml).
     """
     conf = load_tamago_conf(conf_path)
     if conf is None:
         print(f"error   could not parse tamago.conf: {conf_path}", file=sys.stderr)
         return 1
 
-    # Guard: project conf supports only one [[profiles]] entry.
-    if len(conf.profiles) > 1:
+    if conf.profiles:
         print(
-            f"error   tamago.conf has {len(conf.profiles)} [[profiles]] entries — "
-            f"only one is supported in project conf — for multiple profiles, declare them in ~/.tamago/tamago.conf",
+            "warning [[profiles]] in project tamago.conf is no longer supported — "
+            "declare profiles in ~/.tamago/tamago.conf instead",
             file=sys.stderr,
         )
-        return 1
 
     # Two-tier conflict check: same name in both global and project conf is an error.
     global_conf = load_tamago_conf(global_conf_path)
@@ -2495,43 +2493,22 @@ def install_from_conf(
 
     machine_toml_path = project_root / ".tamago" / MACHINE_TOML_NAME
 
-    # For UNINSTALL: try machine.toml first — it has the path we resolved at install
-    # time, which is stable even if the user later edits tamago.conf.
+    # Profile always comes from global conf — project conf does not declare profiles.
     profile_root: Path | None = None
-    if operation == Operation.UNINSTALL:
-        machine_data = load_machine_toml(machine_toml_path)
-        if machine_data is not None:
-            for path_str in machine_data.profiles.values():
-                candidate = Path(path_str)
-                if candidate.is_dir():
-                    profile_root = candidate
-                    print(f"info    using profile from machine.toml: {profile_root}")
-                    break
-
-    # Resolve profile: project conf takes precedence; global conf is the fallback.
-    # This lets a single [[profiles]] entry in ~/.tamago/tamago.conf serve all projects
-    # without repeating it in every project conf.
-    if profile_root is None:
-        if conf.profiles:
-            profile_entry = conf.profiles[0]
-        elif global_conf is not None and global_conf.profiles:
-            profile_entry = global_conf.profiles[0]
-            label = profile_entry.name or profile_entry.repo or "default"
-            print(f"info    using profile from global tamago.conf: {label}")
-        else:
-            profile_entry = None
-
-        if profile_entry is not None:
-            try:
-                profile_root = resolve_profile_root(
-                    source_root,
-                    profile_dir=None,
-                    profile_repo=profile_entry.repo,
-                    profile_name=profile_entry.name,
-                )
-            except ValueError as e:
-                print(e, file=sys.stderr)
-                return 1
+    if global_conf is not None and global_conf.profiles:
+        profile_entry = global_conf.profiles[0]
+        label = profile_entry.name or profile_entry.repo or "default"
+        print(f"info    using profile from global tamago.conf: {label}")
+        try:
+            profile_root = resolve_profile_root(
+                source_root,
+                profile_dir=None,
+                profile_repo=profile_entry.repo,
+                profile_name=profile_entry.name,
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
 
     # Derive tts_enabled: first [[agents]] entry with source="profile" wins.
     # tamago-built-in agents don't generate TTS sections regardless.
@@ -2578,7 +2555,7 @@ def install_from_conf(
     # Do it BEFORE setup_external_skills so the profile path is captured even if a
     # URL-skill clone fails.
     if operation == Operation.INSTALL:
-        _write_install_machine_toml(machine_toml_path, conf, profile_root, cache_root)
+        _write_install_machine_toml(machine_toml_path, conf, None, cache_root)
         # Register in the global project registry so 'tamago prune' and future
         # 'tamago update --all' can find this project.
         add_project_to_registry(project_root, registry_path)

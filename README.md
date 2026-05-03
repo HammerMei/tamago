@@ -123,8 +123,6 @@ repo  = "https://github.com/HammerMei/nagori"
 Installed by `tamago install` from inside a project directory. Controls what's installed for this project only.
 
 ```toml
-# Profile is inherited from ~/.tamago/tamago.conf if omitted here
-
 # Single agent (most common)
 [[agents]]
 name   = "hammer.mei"   # persona file in profile repo
