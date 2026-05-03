@@ -2988,6 +2988,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="update installed agents and skills — alias for install",
         parents=[source_parser, conf_parser],
     )
+    subparsers.add_parser(
+        "update-global",
+        help="pull latest global plugins/skills and re-install — alias for install-global with pull",
+        parents=[source_parser],
+    )
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -3034,13 +3039,15 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    # Track whether this was 'tamago update' before aliasing — determines whether
-    # cached skill repos should be pulled (update pulls; install does not).
-    was_update = args.command == "update"
+    # Track whether this was a 'tamago update*' command before aliasing —
+    # determines whether cached skill/plugin repos should be pulled.
+    was_update = args.command in ("update", "update-global")
 
-    # 'update' is an alias for 'install' — same behaviour, future-proof name.
+    # Aliases: update → install, update-global → install-global
     if args.command == "update":
         args.command = "install"
+    elif args.command == "update-global":
+        args.command = "install-global"
 
     # prune doesn't need source_root — handle it before resolution.
     if args.command == "prune":
