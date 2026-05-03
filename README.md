@@ -125,11 +125,17 @@ Installed by `tamago install` from inside a project directory. Controls what's i
 ```toml
 # Profile is inherited from ~/.tamago/tamago.conf if omitted here
 
+# Single agent (most common)
 [[agents]]
 name   = "hammer.mei"   # persona file in profile repo
 source = "profile"
 tts    = true
 memory = true
+
+# Multiple agents in one repo — "全家桶" mode
+# [[agents]]
+# name   = "wave.bro"
+# source = "profile"
 
 # URL-sourced external skills (project-scoped)
 [[skills]]
@@ -265,11 +271,13 @@ Memory is git-backed and syncs automatically via Claude Code hooks:
 
 | Hook | Action |
 |------|--------|
-| `SessionStart` | Create env dir + record harness/model in `visited.md` |
+| `SessionStart` | Create env dir + record harness/model in `visited.md` (all agents) |
 | `UserPromptSubmit` | `git pull --rebase` — fetch latest memory |
 | `Stop` | Commit changed memory files → pull → push |
 
 All memory lives in `<profile-repo>/agents/memory/<agent-name>/`.  
+With multiple `[[agents]]` in your conf, `tamago install` writes `AGENT_NAMES='name1 name2 ...'`
+to `machine.env` and `SessionStart` initialises an env dir for each agent automatically.  
 Set `LAOMEI_MEMORY_SYNC=0` to disable sync (offline / emergency use).  
 Per-project control: set `memory_sync = false` in `[settings]` of your project `tamago.conf`.
 

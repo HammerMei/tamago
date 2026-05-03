@@ -49,9 +49,10 @@ The logic lives in `scripts/memory-sync.sh`.
 ```
 Session starts
   └── SessionStart → memory-sync.sh --init claude-code
-          Creates env-<hostname>/ on first visit
-          Appends to visited.md when harness/model changes
-          Commits + pushes so the next pull sees a clean tree
+          For each agent in AGENT_NAMES (falls back to AGENT_NAME):
+            Creates env-<hostname>/ on first visit
+            Appends to visited.md when harness/model changes
+          Commits + pushes once so the next pull sees a clean tree
 
 User sends a message
   └── UserPromptSubmit → memory-sync.sh --pull
@@ -73,8 +74,17 @@ Claude finishes a reply
 
 ```bash
 PROFILE_REPO=/Users/you/.tamago/my-profile
-AGENT_NAME=my-agent
+AGENT_NAME=my-agent           # first (or only) agent — used as default-agent pointer
+AGENT_NAMES='my-agent'        # space-separated list of all non-disabled agents
 MEMORY_SYNC=1
+TTS_ENABLED=1
+```
+
+With multiple `[[agents]]` declared in `tamago.conf`, `AGENT_NAMES` holds all of them:
+
+```bash
+AGENT_NAME=hammer.mei
+AGENT_NAMES='hammer.mei wave.bro'
 ```
 
 `memory-sync.sh` sources this file at hook time. Discovery order:
@@ -92,6 +102,34 @@ export MEMORY_SYNC=0   # disable for this shell session
 ```
 
 The legacy env var `LAOMEI_MEMORY_SYNC=0` also works for backward compatibility.
+
+---
+
+## Multi-Agent Support ("全家桶")
+
+You can install multiple agents in a single repo by adding multiple `[[agents]]` blocks
+to your project `tamago.conf`:
+
+```toml
+[[agents]]
+name   = "hammer.mei"
+source = "profile"
+tts    = true
+memory = true
+
+[[agents]]
+name   = "wave.bro"
+source = "profile"
+```
+
+`tamago install` writes all non-disabled agent names to `AGENT_NAMES` in `machine.env`.
+`memory-sync.sh --init` then creates an `env-<hostname>/` dir (with `MEMORY.md` and
+`visited.md`) for **each** agent on first session, in a single git commit.
+
+`--pull` and `--push` operate on the whole `agents/memory/` tree — no per-agent loop needed.
+
+> **Backward compat**: scripts that only read `AGENT_NAME` continue to work — it always
+> holds the first non-disabled agent name (the default-agent pointer).
 
 ---
 
@@ -147,3 +185,4 @@ bash ~/.tamago/scripts/health-check.sh
 | `git pull --rebase` fails on dirty tree | `--init` commits immediately after writing `visited.md` |
 | OpenCode fire-and-forget race | `runSessionInit` must be `await`ed so Stop hook doesn't push before init completes |
 | Memory files in `~/.claude/` won't sync | Memory must live inside `$PROFILE_REPO/agents/memory/` |
+| `AGENT_NAMES` absent in old machine.env | `--init` falls back to `AGENT_NAME`; re-run `tamago install` to upgrade |
