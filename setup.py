@@ -2494,9 +2494,16 @@ def install_from_conf(
     machine_toml_path = project_root / ".tamago" / MACHINE_TOML_NAME
 
     # Profile always comes from global conf — project conf does not declare profiles.
+    # Smart selection: prefer a global profile whose name matches a profile-sourced
+    # agent declared in this project conf.  This lets each project pick the right
+    # persona without re-declaring [[profiles]] locally.  Falls back to profiles[0].
     profile_root: Path | None = None
     if global_conf is not None and global_conf.profiles:
-        profile_entry = global_conf.profiles[0]
+        profile_agent_names = {a.name for a in conf.agents if a.source == "profile"}
+        profile_entry = next(
+            (p for p in global_conf.profiles if p.name in profile_agent_names),
+            global_conf.profiles[0],
+        )
         label = profile_entry.name or profile_entry.repo or "default"
         print(f"info    using profile from global tamago.conf: {label}")
         try:

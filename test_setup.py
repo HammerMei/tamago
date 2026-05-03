@@ -2472,6 +2472,54 @@ tts = false
             _, kwargs = mock_setup.call_args
             self.assertIsNone(kwargs["profile_root"])
 
+    def test_project_install_selects_profile_matching_agent_name(self):
+        """When global conf has multiple profiles, pick the one whose name matches
+        a profile-sourced agent declared in the project conf."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile_hammer = root / "hammer-profile"
+            profile_edm = root / "edm-profile"
+            project = root / "project"
+            source = root / "source"
+            for d in (profile_hammer, profile_edm, project, source):
+                d.mkdir()
+
+            conf_path = project / ".tamago" / "tamago.conf"
+            conf_path.parent.mkdir()
+            # Project uses edm.mei agent — should resolve edm.mei profile, not hammer.mei
+            conf_path.write_text('[[agents]]\nname = "edm.mei"\nsource = "profile"\n')
+
+            global_conf = root / "global.conf"
+            global_conf.write_text(
+                '[[profiles]]\nname = "hammer.mei"\n\n'
+                '[[profiles]]\nname = "edm.mei"\n'
+            )
+
+            resolved_profiles = {"hammer.mei": profile_hammer, "edm.mei": profile_edm}
+
+            def fake_resolve(source_root, profile_dir, profile_repo, profile_name):
+                return resolved_profiles[profile_name]
+
+            with (
+                mock.patch.object(sm, "run_health_check"),
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "setup_external_skills", return_value=0),
+                mock.patch.object(sm, "setup_plugins", return_value=0),
+                mock.patch.object(sm, "_write_install_machine_toml"),
+                mock.patch.object(sm, "add_project_to_registry"),
+                mock.patch.object(sm, "resolve_profile_root", side_effect=fake_resolve),
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                rc = sm.install_from_conf(
+                    conf_path, sm.Operation.INSTALL, source, project,
+                    global_conf_path=global_conf,
+                )
+
+            self.assertEqual(rc, 0)
+            _, kwargs = mock_setup.call_args
+            # Must have received edm-profile, not hammer-profile
+            self.assertEqual(kwargs["profile_root"], profile_edm)
+
 
 class SkillRepoCacheTests(unittest.TestCase):
     """Tests for _skill_repo_cache_dir and _clone_or_reuse_skill_repo."""
