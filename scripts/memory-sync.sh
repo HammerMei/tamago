@@ -21,6 +21,10 @@
 #   --pull and --push operate on the whole profile repo — no per-agent loop needed.
 #   Backward compat: falls back to single AGENT_NAME when AGENT_NAMES is absent.
 
+# Detach from hook's stdin so git subprocesses never inherit an open pipe
+# (some harnesses e.g. OpenClaude keep stdin open, which can cause git to hang)
+exec </dev/null
+
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
 MEMORY_PATH="agents/memory"
 
