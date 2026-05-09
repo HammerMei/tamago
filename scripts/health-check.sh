@@ -68,6 +68,7 @@ fi
 
 AGENT_NAME=""
 AGENT_SCOPE="project"
+AGENT_SOURCE="tamago"   # "profile" for persona agents, "tamago" for built-ins
 if [ -f "$PROJECT_CONF" ]; then
   _agent_out=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
 import sys
@@ -82,12 +83,12 @@ agents = conf.get('agents', [])
 if agents:
     # TODO: multi-agent configs (len(agents) > 1) only check the first agent's scope.
     a = agents[0]
-    print(a.get('name', ''), a.get('scope', 'project'))
+    print(a.get('name', ''), a.get('scope', 'project'), a.get('source', 'tamago'))
 # else: print nothing — no agents configured; AGENT_NAME stays empty
 PY
   ) || _agent_out=""
   if [ -n "$_agent_out" ]; then
-    read -r AGENT_NAME AGENT_SCOPE <<< "$_agent_out"
+    read -r AGENT_NAME AGENT_SCOPE AGENT_SOURCE <<< "$_agent_out"
   fi
 fi
 
@@ -279,10 +280,12 @@ fi
 
 if [ "$HAS_PROFILE" = false ]; then
   pass "memory dir" "no profile configured — skipping"
-elif [ -n "$AGENT_NAME" ]; then
+elif [ -n "$AGENT_NAME" ] && [ "$AGENT_SOURCE" = "profile" ]; then
   [ -d "$PROFILE_REPO/agents/memory/$AGENT_NAME" ] \
     && pass "memory dir" "$AGENT_NAME/" \
     || fail "memory dir" "not found: $PROFILE_REPO/agents/memory/$AGENT_NAME"
+elif [ -n "$AGENT_NAME" ]; then
+  pass "memory dir" "tamago built-in agent ($AGENT_NAME) — no memory dir"
 else
   pass "memory dir" "no agent in tamago.conf — skipping"
 fi
@@ -460,9 +463,19 @@ PY
     fi
   fi
 
-  if [ "$HAS_PROFILE" = false ]; then
+  if [ -n "$AGENT_NAME" ] && [ "$AGENT_SOURCE" != "profile" ]; then
+    # Tamago built-in agent: files are symlinks (not generated); no memory dir.
+    if [ "$AGENT_SCOPE" = "global" ]; then
+      check_symlink "$HOME/.claude/agents/$AGENT_NAME.md"   "~/.claude/agents/$AGENT_NAME.md"
+      check_symlink "$HOME/.opencode/agents/$AGENT_NAME.md" "~/.opencode/agents/$AGENT_NAME.md"
+    else
+      check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"   ".claude/agents/$AGENT_NAME.md"
+      check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md" ".opencode/agents/$AGENT_NAME.md"
+    fi
+  elif [ "$HAS_PROFILE" = false ]; then
     pass "agent symlinks" "no profile configured — skipping"
   elif [ -n "$AGENT_NAME" ]; then
+    # Persona agent (source=profile): files are generated; has memory dir symlink.
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
       check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"

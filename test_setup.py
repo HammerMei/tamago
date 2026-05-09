@@ -2151,6 +2151,8 @@ tts = false
         """Only source='profile' agents drive tts_enabled; tamago-source is ignored."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             self._write_toml(conf_path, """
 [[agents]]
 name = "code-reviewer"
@@ -2166,6 +2168,7 @@ tts = false
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             # tts_enabled defaults to True because no profile agent was specified
@@ -4524,6 +4527,100 @@ printf '%s' "{{\"msg\":\"$escaped\"}}"
         self.assertIn("\n", parsed["msg"], "Decoded message should contain a literal newline")
         self.assertIn("\t", parsed["msg"], "Decoded message should contain a literal tab")
 
+    def _setup_builtin_agent_env(self, root: Path, agent_name: str) -> tuple[Path, Path, Path, Path]:
+        """Minimal env for global install with a tamago built-in agent (source='tamago')."""
+        tamago = root / "tamago"
+        profile = root / "profile"
+        home = root / "home"
+        project = home  # global install uses home as project dir
+
+        (tamago / "skills").mkdir(parents=True, exist_ok=True)
+        (tamago / "settings" / "claude").mkdir(parents=True)
+        (tamago / "settings" / "claude" / "settings.json").write_text("{}")
+        (tamago / "settings" / "opencode").mkdir(parents=True)
+        (tamago / "settings" / "opencode" / "opencode.json").write_text("{}")
+
+        # Global conf: built-in agent only, no persona agent
+        (tamago / "tamago.conf").write_text(
+            f'[[agents]]\nname = "{agent_name}"\nsource = "tamago"\n'
+        )
+
+        # Profile exists (has agents/memory for hammer.mei, not for the built-in)
+        (profile / "agents" / "memory" / "hammer.mei").mkdir(parents=True)
+        (profile / "settings" / "claude").mkdir(parents=True)
+        (profile / "settings" / "claude" / "settings.json").write_text(
+            '{"agent": "hammer.mei"}'
+        )
+
+        # Home dirs + manifests
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / ".tamago-manifest.json").write_text("{}")
+        (home / ".opencode").mkdir(parents=True)
+        (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+
+        # machine.env pointing to profile
+        (home / ".tamago").mkdir(parents=True)
+        (home / ".tamago" / "machine.env").write_text(f'PROFILE_REPO="{profile}"\n')
+        (home / ".tamago" / "machine.toml").write_text("")
+
+        # project conf at home/.tamago/tamago.conf (same as global conf for global installs)
+        (home / ".tamago" / "tamago.conf").write_text(
+            f'[[agents]]\nname = "{agent_name}"\nsource = "tamago"\n'
+        )
+
+        return tamago, profile, home, project
+
+    def test_tamago_builtin_agent_symlink_passes_agent_check(self):
+        """Health check passes agent symlink check when agents[0] has source='tamago'.
+
+        Built-in agents are symlinks, not generated files. The health check must use
+        check_symlink (not check_generated) so the ⚠️ 'manual file' warning is NOT emitted.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_builtin_agent_env(root, "code-reviewer")
+
+            # Place the built-in agent as a symlink (as tamago would install it)
+            agents_dir = home / ".claude" / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            fake_source = tamago / "agents" / "code-reviewer.md"
+            fake_source.parent.mkdir(parents=True, exist_ok=True)
+            fake_source.write_text("# code-reviewer\n")
+            (agents_dir / "code-reviewer.md").symlink_to(fake_source)
+
+            data = _run_health_check(project, tamago, home, profile)
+
+            # Agent file check must pass (symlink), not warn
+            agent_result = next(
+                (r for r in data.get("results", []) if "code-reviewer" in r.get("name", "")),
+                None,
+            )
+            self.assertIsNotNone(agent_result, f"No code-reviewer result; all: {data['results']}")
+            self.assertEqual(agent_result["status"], "pass",
+                             f"Expected pass for symlinked built-in agent; got: {agent_result}")
+
+    def test_tamago_builtin_agent_skips_memory_dir_check(self):
+        """Health check does NOT fail on missing memory dir when agents[0] has source='tamago'.
+
+        Built-in agents have no profile memory directory — the check must be skipped,
+        not reported as a failure.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_builtin_agent_env(root, "code-reviewer")
+
+            data = _run_health_check(project, tamago, home, profile)
+
+            memory_result = next(
+                (r for r in data.get("results", []) if "memory dir" in r.get("name", "")),
+                None,
+            )
+            self.assertIsNotNone(memory_result, f"No 'memory dir' result; all: {data['results']}")
+            self.assertNotEqual(
+                memory_result["status"], "fail",
+                f"memory dir must not fail for tamago built-in agent; got: {memory_result}",
+            )
+
 
 class SkillScopeRoutingTests(unittest.TestCase):
     """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
@@ -5117,6 +5214,8 @@ class DisableAgentTests(unittest.TestCase):
         """install_from_conf derives enabled_agents and enabled_skills whitelists."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             conf_path.write_text(
                 '[[agents]]\nname = "code-reviewer"\n'
                 '[[agents]]\nname = "plan"\n'
@@ -5143,6 +5242,7 @@ class DisableAgentTests(unittest.TestCase):
                     Path(td) / "source",
                     project_root,
                     registry_path=registry,
+                    global_conf_path=empty_global,
                 )
 
             self.assertEqual(captured["enabled_agents"], {"code-reviewer", "plan"})
