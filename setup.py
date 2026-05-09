@@ -745,7 +745,6 @@ def setup_settings(
     if agent_name:
         claude_contribution = _make_default_agent_settings_claude(agent_name)
     else:
-        print("warn    no agent name in tamago.conf — skipping default-agent pointer in settings")
         claude_contribution = {}
     if profile_root:
         profile_claude_path = profile_root / "settings" / "claude" / "settings.json"
@@ -755,6 +754,10 @@ def setup_settings(
                 claude_contribution = _deep_merge_json(claude_contribution, profile_claude)
             except (OSError, ValueError) as e:
                 print(f"warn    could not load profile claude settings: {e}")
+    # Safety: if no persona agent is declared, strip any agent pointer that may have
+    # leaked in from the profile's settings.json (it belongs to project-scoped installs).
+    if agent_name is None:
+        claude_contribution.pop("agent", None)
 
     # --- Build OpenCode contribution: default-agent pointer (if named) + profile override ---
     if agent_name:
@@ -769,6 +772,8 @@ def setup_settings(
                 opencode_contribution = _deep_merge_json(opencode_contribution, profile_opencode)
             except (OSError, ValueError) as e:
                 print(f"warn    could not load profile opencode settings: {e}")
+    if agent_name is None:
+        opencode_contribution.pop("default_agent", None)
 
     # --- Route patch to the correct scope ---
     if install_globally:
@@ -2531,9 +2536,13 @@ def install_from_conf(
         )
 
     # Agent names: all listed agents (multi-agent "全家桶" support).
-    # The first one also doubles as the default-agent pointer for settings.
     agent_names: list[str] = [a.name for a in conf.agents]
-    agent_name: str | None = agent_names[0] if agent_names else None
+    # Default-agent pointer: only persona agents (source="profile") become the default
+    # agent in Claude Code / OpenCode settings. Tamago built-in agents (source="tamago")
+    # are utility agents and must NOT be set as the default agent.
+    agent_name: str | None = next(
+        (a.name for a in conf.agents if a.source == "profile"), None
+    )
 
     rc = setup(
         operation,
@@ -2727,7 +2736,12 @@ def install_global_from_conf(
             break
     # Agent names: all listed agents (multi-agent support).
     agent_names: list[str] = [a.name for a in conf.agents]
-    agent_name: str | None = agent_names[0] if agent_names else None
+    # Default-agent pointer: only persona agents (source="profile") become the default
+    # agent in Claude Code / OpenCode settings. Tamago built-in agents (source="tamago")
+    # are utility agents and must NOT be set as the default agent.
+    agent_name: str | None = next(
+        (a.name for a in conf.agents if a.source == "profile"), None
+    )
 
     # CONVENTIONAL_ROOT (~/.tamago) is used as stand-in project_root.
     # With install_globally=True, setup_agents/setup_skills route to ~/.claude/ so

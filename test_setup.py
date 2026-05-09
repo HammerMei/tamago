@@ -2217,10 +2217,12 @@ tts = false
             mock_pull.assert_called_once_with(source, "tamago")
 
     def test_agent_name_from_conf_agents_passed_to_setup(self):
-        """install_from_conf reads agent name from [[agents]] name= and passes it to setup()."""
+        """install_from_conf reads agent name from [[agents]] name= and passes it to setup() only for profile agents."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
-            conf_path.write_text('[[agents]]\nname = "my.agent"\n')
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
+            conf_path.write_text('[[agents]]\nname = "my.agent"\nsource = "profile"\n')
 
             with (
                 mock.patch.object(sm, "setup", return_value=0) as mock_setup,
@@ -2231,18 +2233,24 @@ tts = false
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
             self.assertEqual(result, 0)
             self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "my.agent")
 
-    def test_first_listed_agent_is_agent_name(self):
-        """The first [[agents]] entry in conf is selected as agent_name (default-agent pointer)."""
+    def test_first_profile_agent_is_agent_name(self):
+        """The first source='profile' [[agents]] entry is selected as agent_name (default-agent pointer).
+
+        Tamago built-in agents (source='tamago') are skipped even when listed first.
+        """
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             conf_path.write_text(
-                '[[agents]]\nname = "first.agent"\n\n'
-                '[[agents]]\nname = "second.agent"\n'
+                '[[agents]]\nname = "code-reviewer"\nsource = "tamago"\n\n'
+                '[[agents]]\nname = "my.persona"\nsource = "profile"\n'
             )
 
             with (
@@ -2254,9 +2262,37 @@ tts = false
                     sm.Operation.INSTALL,
                     Path(td) / "source",
                     Path(td) / "project",
+                    global_conf_path=empty_global,
                 )
 
-            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "first.agent")
+            # code-reviewer is tamago built-in → not the default agent pointer
+            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "my.persona")
+
+    def test_tamago_source_agent_does_not_set_agent_name(self):
+        """source='tamago' agents must NOT become the default-agent pointer (agent_name=None)."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "tamago.conf"
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
+            conf_path.write_text(
+                '[[agents]]\nname = "code-reviewer"\nsource = "tamago"\n\n'
+                '[[agents]]\nname = "technical-writer"\nsource = "tamago"\n'
+            )
+
+            with (
+                mock.patch.object(sm, "setup", return_value=0) as mock_setup,
+                mock.patch.object(sm, "pull_repo"),
+            ):
+                sm.install_from_conf(
+                    conf_path,
+                    sm.Operation.INSTALL,
+                    Path(td) / "source",
+                    Path(td) / "project",
+                    global_conf_path=empty_global,
+                )
+
+            self.assertIsNone(mock_setup.call_args.kwargs["agent_name"],
+                              "Built-in tamago agents must not set the default-agent pointer")
 
     def test_no_agents_passes_none_agent_name(self):
         """When tamago.conf has no [[agents]], agent_name=None is passed to setup()."""
@@ -7165,8 +7201,8 @@ class SetupSettingsScopeTests(unittest.TestCase):
             project_data = json.loads((project / ".claude" / "settings.json").read_text())
             self.assertEqual(project_data["agent"], "hammer.mei")
 
-    def test_no_agent_name_warns_and_skips_agent_pointer(self):
-        """When agent_name is None, a warning is printed and no 'agent' key is written."""
+    def test_no_agent_name_skips_agent_pointer(self):
+        """When agent_name is None, no 'agent' key is written (silently skipped)."""
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             project = td / "project"
@@ -7174,8 +7210,7 @@ class SetupSettingsScopeTests(unittest.TestCase):
             source = td / "source"
             (source / "settings" / "claude").mkdir(parents=True)
 
-            stdout = io.StringIO()
-            with mock.patch("sys.stdout", stdout):
+            with mock.patch("sys.stdout", io.StringIO()):
                 sm.setup_settings(
                     sm.Operation.INSTALL,
                     source,
@@ -7183,7 +7218,6 @@ class SetupSettingsScopeTests(unittest.TestCase):
                     agent_name=None,
                 )
 
-            self.assertIn("no agent name in tamago.conf", stdout.getvalue())
             settings = project / ".claude" / "settings.json"
             if settings.exists():
                 data = json.loads(settings.read_text())
@@ -7212,6 +7246,36 @@ class SetupSettingsScopeTests(unittest.TestCase):
             data = json.loads(settings.read_text())
             self.assertNotIn("agent", data)
             self.assertTrue(data.get("pluginX"), "profile settings should still be merged")
+
+    def test_profile_agent_key_stripped_when_no_agent_name(self):
+        """Profile settings.json may contain {'agent': '...'} for project installs.
+
+        When agent_name=None (no globally-declared persona agent), this agent key
+        must NOT leak into the global ~/.claude/settings.json.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            project = td / "project"
+            project.mkdir()
+            source = td / "source"
+            (source / "settings" / "claude").mkdir(parents=True)
+            # Profile settings has an 'agent' key (normal for project installs)
+            profile = self._make_profile(td, claude_settings={"agent": "hammer.mei", "someKey": True})
+
+            with mock.patch("sys.stdout", io.StringIO()):
+                sm.setup_settings(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    profile_root=profile,
+                    agent_name=None,
+                )
+
+            settings = project / ".claude" / "settings.json"
+            data = json.loads(settings.read_text())
+            self.assertNotIn("agent", data,
+                             "Profile 'agent' key must not be injected when agent_name=None")
+            self.assertTrue(data.get("someKey"), "Other profile settings should still be merged")
 
 
 class TestLoadTamagoConfPlugins(unittest.TestCase):
