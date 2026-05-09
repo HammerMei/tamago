@@ -273,7 +273,6 @@ class AgentEntry:
     source: str = "tamago"
     tts: bool = True
     memory: bool = True
-    disable: bool = False
 
 
 @dataclass
@@ -281,7 +280,6 @@ class SkillEntry:
     name: str
     source: str = "tamago"
     path: str | None = None
-    disable: bool = False
 
 
 @dataclass
@@ -326,27 +324,39 @@ def load_tamago_conf(path: Path) -> "TamagoConf | None":
             ProfileEntry(name=p.get("name"), repo=p.get("repo"))
             for p in raw.get("profiles", [])
         ]
-        agents = [
-            AgentEntry(
+        agents = []
+        for a in raw.get("agents", []):
+            if "name" not in a:
+                continue
+            if "disable" in a:
+                print(
+                    f"warning [[agents]] '{a['name']}': 'disable' is no longer supported "
+                    f"and is ignored — the agent WILL be installed. "
+                    f"Remove the entry entirely to skip it.",
+                    file=sys.stderr,
+                )
+            agents.append(AgentEntry(
                 name=a["name"],
                 source=a.get("source", "tamago"),
                 tts=a.get("tts", True),
                 memory=a.get("memory", True),
-                disable=a.get("disable", False),
-            )
-            for a in raw.get("agents", [])
-            if "name" in a
-        ]
-        skills = [
-            SkillEntry(
+            ))
+        skills = []
+        for s in raw.get("skills", []):
+            if "name" not in s:
+                continue
+            if "disable" in s:
+                print(
+                    f"warning [[skills]] '{s['name']}': 'disable' is no longer supported "
+                    f"and is ignored — the skill WILL be installed. "
+                    f"Remove the entry entirely to skip it.",
+                    file=sys.stderr,
+                )
+            skills.append(SkillEntry(
                 name=s["name"],
                 source=os.path.expanduser(s.get("source", "tamago")),
                 path=s.get("path"),
-                disable=s.get("disable", False),
-            )
-            for s in raw.get("skills", [])
-            if "name" in s
-        ]
+            ))
         plugins = [
             PluginEntry(
                 name=pl["name"],
@@ -435,7 +445,6 @@ def load_machine_toml(path: Path) -> "MachineToml | None":
         return None
 
 
-
 MACHINE_ENV_NAME = "machine.env"  # lives inside <project_dir>/.tamago/
 
 
@@ -464,7 +473,7 @@ def write_machine_env(
     sourcing the file is safe even when they contain spaces or shell metacharacters.
     The file is gitignored (machine-local) and regenerated on every install.
 
-    agent_names: full list of non-disabled agent names (multi-agent support).
+    agent_names: full list of enabled agent names (multi-agent support).
       Written as AGENT_NAMES='name1 name2 ...' — memory-sync.sh loops over this.
       Falls back to [agent_name] when not provided (backward compat).
 
@@ -865,7 +874,6 @@ def _expand_home_in_str(s: str) -> str:
     but does NOT expand ~ in the patterns themselves.  To ensure patterns match,
     we expand ~ at inject-time so the stored pattern uses the absolute path.
     """
-    import os
     home = os.path.expanduser("~")
     return s.replace("~", home)
 
@@ -909,8 +917,6 @@ def patch_settings(
     unpatch_settings uses it to remove only tamago's entries, leaving user additions
     untouched.
     """
-    import json
-
     # Handle symlink migration: read content, unlink, write as real file.
     # Track whether we migrated so we can pre-populate the manifest below.
     migrated_from_symlink = False
@@ -1050,8 +1056,6 @@ def unpatch_settings(path: Path, manifest_path: Path) -> None:
     the user modified after injection are left in place (command string must match
     exactly for removal to trigger — a modified command is treated as user-owned).
     """
-    import json
-
     if not manifest_path.exists():
         print(f"skip    {manifest_path} not found — nothing to uninstall")
         return
@@ -1139,8 +1143,6 @@ def patch_global_settings(operation: Operation, source_root: Path) -> None:
     Reads tamago's source settings/claude/settings.json to determine what to inject.
     Writes a sidecar manifest at ~/.claude/.tamago-manifest.json for clean uninstall.
     """
-    import json
-
     settings_path = Path("~/.claude/settings.json").expanduser()
     manifest_path = Path("~/.claude/.tamago-manifest.json").expanduser()
 
@@ -1302,21 +1304,6 @@ def _merge_agent(
     print(f"merged  {output}")
 
 
-def _remove_generated_agents(profile_root: Path, target_dir: Path) -> None:
-    """Remove generated agent .md files from target_dir."""
-    if not (profile_root / "agents").is_dir():
-        return
-    for persona_file in (profile_root / "agents").iterdir():
-        if not (persona_file.is_file() and persona_file.suffix == ".md"):
-            continue
-        stem = persona_file.stem
-        agent_name = stem[: -len(".persona")] if stem.endswith(".persona") else stem
-        target = target_dir / f"{agent_name}.md"
-        if target.exists() and GENERATED_HEADER_MARKER in target.read_text()[:1024]:
-            target.unlink()
-            print(f"removed {target}")
-
-
 def _remove_agent_files_if_managed(agent_name: str, target_dirs: list[Path], label: str = "") -> None:
     """Remove a tamago-managed agent file (symlink or generated) from each target dir.
 
@@ -1343,21 +1330,22 @@ def setup_agents(
     project_root: Path,
     profile_root: Path | None = None,
     tts_enabled: bool = True,
-    disabled_agents: "set[str] | None" = None,
+    enabled_agents: "set[str] | None" = None,
     install_globally: bool = False,
 ):
     """Install/uninstall agents into project_root (or ~/.claude/agents/ when install_globally=True).
 
-    disabled_agents:   skip entirely — no agent file, no memory dir.
+    enabled_agents:    whitelist — only install agents whose name is in this set.
+                       None means "install all" (only meaningful for direct callers bypassing
+                       conf; conf-driven paths always pass a set).  Empty set installs nothing.
     install_globally:  when True, install to ~/.claude/agents/ (and ~/.opencode/agents/)
                        instead of the project-level agents dir.  Memory dirs follow the
                        same routing.  Use for the global-conf path (tamago install-global).
-    On UNINSTALL: the scope matches the current install_globally flag.  If scope changed
-    between installs without re-running install, orphaned files may remain — acceptable;
-    the user can clean them up manually or re-install first.
+    On UNINSTALL: only agents in enabled_agents are removed (same whitelist as INSTALL).
+                  If an agent was removed from the conf before uninstall, its files remain
+                  as orphans — acceptable; re-install first or clean manually.
+                  Same orphan behavior applies to install_global_from_conf.
     """
-    if disabled_agents is None:
-        disabled_agents = set()
 
     source_opencode_plugin_root = source_root / "settings" / "opencode" / "plugins"
 
@@ -1368,14 +1356,12 @@ def setup_agents(
 
     home_claude_agents = Path("~/.claude/agents").expanduser()
     home_opencode_agents = Path("~/.opencode/agents").expanduser()
-
-    # All dirs an agent might have been installed to (for disabled cleanup / uninstall)
-    all_claude_dirs = [target_claude_agent_root, home_claude_agents]
-    all_opencode_dirs = [target_opencode_agent_root, home_opencode_agents]
+    home_opencode_plugins = Path("~/.opencode/plugins").expanduser()
 
     # Route all agents to the same tier (global or project) — no per-agent routing.
-    claude_agents_dir  = home_claude_agents  if install_globally else target_claude_agent_root
+    claude_agents_dir   = home_claude_agents   if install_globally else target_claude_agent_root
     opencode_agents_dir = home_opencode_agents if install_globally else target_opencode_agent_root
+    opencode_plugin_root = home_opencode_plugins if install_globally else target_opencode_plugin_root
 
     opencode_plugin_files = sub_paths(
         source_opencode_plugin_root, lambda p: p.is_file() and p.suffix == ".ts"
@@ -1385,13 +1371,12 @@ def setup_agents(
     tamago_agent_files = sub_paths(
         source_root / "agents", lambda p: p.is_file() and p.suffix == ".md"
     )
-    enabled_tamago_agents = [f for f in tamago_agent_files if f.stem not in disabled_agents]
+    enabled_tamago_agents = [
+        f for f in tamago_agent_files
+        if enabled_agents is None or f.stem in enabled_agents
+    ]
 
     if operation == Operation.INSTALL:
-        # Remove files for disabled agents from all possible locations
-        for agent_name in disabled_agents:
-            _remove_agent_files_if_managed(agent_name, all_claude_dirs + all_opencode_dirs, "disabled")
-
         if install_globally:
             # Remove project-level files for all agents (scope flip: project → global)
             for f in enabled_tamago_agents:
@@ -1405,7 +1390,7 @@ def setup_agents(
         for f in enabled_tamago_agents:
             symlink_paths([f], claude_agents_dir)
             symlink_paths([f], opencode_agents_dir)
-        symlink_paths(opencode_plugin_files, target_opencode_plugin_root)
+        symlink_paths(opencode_plugin_files, opencode_plugin_root)
 
         # 2. Merge persona agents from profile (*.persona.md → generated *.md)
         #    Plain *.md files in profile/agents/ are symlinked directly.
@@ -1414,7 +1399,10 @@ def setup_agents(
                 profile_root / "agents",
                 lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
             )
-            enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
+            enabled_profile_agents = [
+                f for f in profile_agent_files
+                if enabled_agents is None or f.stem in enabled_agents
+            ]
 
             if install_globally:
                 # Remove project-level files for all profile agents (scope flip: project → global)
@@ -1435,7 +1423,7 @@ def setup_agents(
                     agent_name = persona_file.stem
                     if agent_name.endswith(".persona"):
                         agent_name = agent_name[: -len(".persona")]
-                    if agent_name in disabled_agents:
+                    if enabled_agents is not None and agent_name not in enabled_agents:
                         continue
                     _merge_agent(source_root, profile_root, persona_file, claude_agents_dir, tts_enabled, scope=agent_scope)
                     _merge_agent(source_root, profile_root, persona_file, opencode_agents_dir, tts_enabled, scope=agent_scope)
@@ -1454,7 +1442,10 @@ def setup_agents(
 
         if mem_source:
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
-            enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
+            enabled_mem_dirs = [
+                d for d in agent_mem_dirs
+                if enabled_agents is None or d.name in enabled_agents
+            ]
 
             if install_globally:
                 # Remove project-level memory symlinks (scope flip: project → global)
@@ -1481,7 +1472,7 @@ def setup_agents(
                 if t.is_symlink():
                     t.unlink()
                     print(f"removed {t}")
-        unlink_paths(opencode_plugin_files, target_opencode_plugin_root)
+        unlink_paths(opencode_plugin_files, opencode_plugin_root)
 
         # Remove symlinked plain profile agents and generated persona agents
         if profile_root and (profile_root / "agents").is_dir():
@@ -1489,7 +1480,10 @@ def setup_agents(
                 profile_root / "agents",
                 lambda p: p.is_file() and p.suffix == ".md" and not p.stem.endswith(".persona"),
             )
-            enabled_profile_agents = [f for f in profile_agent_files if f.stem not in disabled_agents]
+            enabled_profile_agents = [
+                f for f in profile_agent_files
+                if enabled_agents is None or f.stem in enabled_agents
+            ]
             for f in enabled_profile_agents:
                 for d in uninstall_dirs:
                     t = d / f.name
@@ -1504,7 +1498,7 @@ def setup_agents(
                 name = persona_file.stem
                 if name.endswith(".persona"):
                     name = name[: -len(".persona")]
-                if name in disabled_agents:
+                if enabled_agents is not None and name not in enabled_agents:
                     continue
                 for d in uninstall_dirs:
                     _remove_agent_files_if_managed(name, [d])
@@ -1518,7 +1512,10 @@ def setup_agents(
         home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
         if mem_source.is_dir():
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
-            enabled_mem_dirs = [d for d in agent_mem_dirs if d.name not in disabled_agents]
+            enabled_mem_dirs = [
+                d for d in agent_mem_dirs
+                if enabled_agents is None or d.name in enabled_agents
+            ]
             mem_root = home_agent_mem_root if install_globally else target_claude_agent_mem_root
             for d in enabled_mem_dirs:
                 _unlink_mem_dir(d, mem_root)
@@ -1533,7 +1530,7 @@ def setup_skills(
     source_root: Path,
     project_root: Path,
     profile_root: Path | None = None,
-    disabled_skills: "set[str] | None" = None,
+    enabled_skills: "set[str] | None" = None,
     install_globally: bool = False,
 ):
     """Symlink skills into the appropriate location.
@@ -1552,12 +1549,12 @@ def setup_skills(
       1. tamago/skills/  — built-in skills bundled with tamago
       2. profile/skills/ — custom skills defined in the profile repo (optional)
 
-    disabled_skills:  names to skip entirely (remove existing symlinks on INSTALL).
+    enabled_skills:   whitelist — only install skills whose name is in this set.
+                      None means "install all" (only meaningful for direct callers bypassing
+                      conf; conf-driven paths always pass a set).  Empty set installs nothing.
     install_globally: when True, install profile skills globally (used for the global-conf
                       path: tamago install-global).
     """
-    if disabled_skills is None:
-        disabled_skills = set()
 
     home_claude_skills = Path("~/.claude/skills").expanduser()
     home_opencode_skills = Path("~/.opencode/skills").expanduser()
@@ -1585,9 +1582,15 @@ def setup_skills(
     # Tamago built-ins NOT shadowed by a profile skill
     tamago_only_dirs = [d for d in tamago_skill_dirs if d.name not in profile_skill_names]
 
-    # Apply disabled filter per source
-    tamago_enabled = [d for d in tamago_only_dirs if d.name not in disabled_skills]
-    profile_enabled = [d for d in profile_skill_dirs if d.name not in disabled_skills]
+    # Apply whitelist filter per source
+    tamago_enabled = [
+        d for d in tamago_only_dirs
+        if enabled_skills is None or d.name in enabled_skills
+    ]
+    profile_enabled = [
+        d for d in profile_skill_dirs
+        if enabled_skills is None or d.name in enabled_skills
+    ]
 
     # Route tamago built-ins: always global (shared across all projects)
     tamago_global: list[Path] = tamago_enabled
@@ -1608,15 +1611,6 @@ def setup_skills(
     local_bin = Path("~/.local/bin").expanduser()
 
     if operation == Operation.INSTALL:
-        # Remove disabled skills from all possible locations
-        for skill_name in disabled_skills:
-            for skills_root in (home_claude_skills, home_opencode_skills,
-                                project_claude_skills, project_opencode_skills):
-                target = skills_root / skill_name
-                if target.is_symlink():
-                    target.unlink()
-                    print(f"removed {target} (disabled)")
-
         # Remove project-level symlinks for skills moving to global scope
         for d in global_skill_dirs:
             for skills_root in (project_claude_skills, project_opencode_skills):
@@ -1860,14 +1854,6 @@ def setup_external_skills(
             stale_roots  = (home_claude_skills, home_opencode_skills)
 
         if operation == Operation.INSTALL:
-            if skill.disable:
-                # Remove from all possible locations; leave cache dir intact
-                for skills_root in (*skills_roots, *stale_roots):
-                    target = skills_root / skill.name
-                    if target.is_symlink():
-                        target.unlink()
-                        print(f"removed {target} (disabled)")
-                continue
             try:
                 skill_dir = _resolve_external_skill_dir(skill, cache_root)
 
@@ -2163,8 +2149,8 @@ def setup(
     profile_root: Path | None = None,
     memory_sync: bool = True,
     tts_enabled: bool = True,
-    disabled_skills: "set[str] | None" = None,
-    disabled_agents: "set[str] | None" = None,
+    enabled_skills: "set[str] | None" = None,
+    enabled_agents: "set[str] | None" = None,
     install_globally: bool = False,
     agent_name: str | None = None,
     agent_names: "list[str] | None" = None,
@@ -2172,8 +2158,8 @@ def setup(
     """Project-level install: symlink skills, agents, settings, memory into project_root."""
     try:
         setup_gitignore(operation, project_root)
-        setup_skills(operation, source_root, project_root, profile_root, disabled_skills, install_globally=install_globally)
-        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, disabled_agents=disabled_agents, install_globally=install_globally)
+        setup_skills(operation, source_root, project_root, profile_root, enabled_skills, install_globally=install_globally)
+        setup_agents(operation, source_root, project_root, profile_root, tts_enabled=tts_enabled, enabled_agents=enabled_agents, install_globally=install_globally)
         setup_settings(operation, source_root, project_root, profile_root, install_globally=install_globally, agent_name=agent_name)
 
         machine_env = project_root / ".tamago" / MACHINE_ENV_NAME
@@ -2398,9 +2384,7 @@ def _check_conf_conflicts(
     """Return human-readable conflict messages for items declared in both tiers.
 
     The two tiers are additive: the same agent/skill/plugin name must not appear
-    in both ~/.tamago/tamago.conf and <project>/.tamago/tamago.conf at the same
-    time.  Disabled items (disable=True) are excluded — they are being removed,
-    not installed, so overlap is harmless.
+    in both ~/.tamago/tamago.conf and <project>/.tamago/tamago.conf at the same time.
 
     Returns an empty list when there are no conflicts (including when global_conf
     is None, i.e. no global conf exists).
@@ -2410,17 +2394,17 @@ def _check_conf_conflicts(
 
     conflicts: list[str] = []
 
-    global_agents  = {a.name for a in global_conf.agents  if not a.disable}
-    global_skills  = {s.name for s in global_conf.skills  if not s.disable}
+    global_agents  = {a.name for a in global_conf.agents}
+    global_skills  = {s.name for s in global_conf.skills}
     global_plugins = {p.name for p in global_conf.plugins if not p.disable}
 
     for a in project_conf.agents:
-        if not a.disable and a.name in global_agents:
+        if a.name in global_agents:
             conflicts.append(
                 f"agent '{a.name}' is declared in both global and project tamago.conf"
             )
     for s in project_conf.skills:
-        if not s.disable and s.name in global_skills:
+        if s.name in global_skills:
             conflicts.append(
                 f"skill '{s.name}' is declared in both global and project tamago.conf"
             )
@@ -2534,12 +2518,21 @@ def install_from_conf(
             _pull_skill_repos(conf.skills, cache_root)
             _pull_plugin_repos(conf.plugins, cache_root)
 
-    disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
-    disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
+    enabled_skills: set[str] = {s.name for s in conf.skills}
+    enabled_agents: set[str] = {a.name for a in conf.agents}
 
-    # Agent names: all non-disabled agents (multi-agent "全家桶" support).
+    if not enabled_agents and not enabled_skills and operation == Operation.INSTALL:
+        print(
+            "info: no [[agents]] or [[skills]] entries found in tamago.conf — "
+            "nothing will be installed.\n"
+            "      hint: add [[agents]] and [[skills]] entries to enable specific agents/skills "
+            "(whitelist semantics).",
+            file=sys.stderr,
+        )
+
+    # Agent names: all listed agents (multi-agent "全家桶" support).
     # The first one also doubles as the default-agent pointer for settings.
-    agent_names: list[str] = [a.name for a in conf.agents if not a.disable]
+    agent_names: list[str] = [a.name for a in conf.agents]
     agent_name: str | None = agent_names[0] if agent_names else None
 
     rc = setup(
@@ -2549,8 +2542,8 @@ def install_from_conf(
         profile_root=profile_root,
         memory_sync=conf.memory_sync,
         tts_enabled=tts_enabled,
-        disabled_skills=disabled_skills,
-        disabled_agents=disabled_agents,
+        enabled_skills=enabled_skills,
+        enabled_agents=enabled_agents,
         install_globally=False,
         agent_name=agent_name,
         agent_names=agent_names,
@@ -2716,15 +2709,24 @@ def install_global_from_conf(
 
     # ── Derive install params ─────────────────────────────────────────────────
     # In the global conf, ALL items are global-scoped (tier determines scope).
-    disabled_agents: set[str] = {a.name for a in conf.agents if a.disable}
-    disabled_skills: set[str] = {s.name for s in conf.skills if s.disable}
+    enabled_agents: set[str] = {a.name for a in conf.agents}
+    enabled_skills: set[str] = {s.name for s in conf.skills}
+
+    if not enabled_agents and not enabled_skills and operation == Operation.INSTALL:
+        print(
+            "info: no [[agents]] or [[skills]] entries found in global tamago.conf — "
+            "nothing will be installed globally.\n"
+            "      hint: add [[agents]] and [[skills]] entries to enable specific agents/skills "
+            "(whitelist semantics).",
+            file=sys.stderr,
+        )
     tts_enabled = True
     for a in conf.agents:
         if a.source == "profile":
             tts_enabled = a.tts
             break
-    # Agent names: all non-disabled agents (multi-agent support).
-    agent_names: list[str] = [a.name for a in conf.agents if not a.disable]
+    # Agent names: all listed agents (multi-agent support).
+    agent_names: list[str] = [a.name for a in conf.agents]
     agent_name: str | None = agent_names[0] if agent_names else None
 
     # CONVENTIONAL_ROOT (~/.tamago) is used as stand-in project_root.
@@ -2734,13 +2736,13 @@ def install_global_from_conf(
 
     # ── Agents ────────────────────────────────────────────────────────────────
     # Loop over all profiles; when none are defined, call once with pr=None so
-    # tamago built-in agents (source="tamago") still get installed.
+    # tamago built-in agents (source="tamago") listed in [[agents]] still get installed.
     for pr in (profile_roots or [None]):
         try:
             setup_agents(
                 operation, source_root, global_root, pr,
                 tts_enabled=tts_enabled,
-                disabled_agents=disabled_agents,
+                enabled_agents=enabled_agents,
                 install_globally=True,
             )
         except Exception as e:
@@ -2749,11 +2751,14 @@ def install_global_from_conf(
 
     # ── Skills (built-in + profile) ───────────────────────────────────────────
     # Loop over all profiles; same fallback-to-None logic as agents above.
+    # Note: with multiple profiles, setup_skills is called once per profile.  Tamago
+    # built-in skill symlinks are idempotent (check before linking), so double-processing
+    # is safe but will produce duplicate "exists" log lines in multi-profile setups.
     for pr in (profile_roots or [None]):
         try:
             setup_skills(
                 operation, source_root, global_root, pr,
-                disabled_skills=disabled_skills,
+                enabled_skills,
                 install_globally=True,
             )
         except Exception as e:
@@ -3120,7 +3125,7 @@ def main() -> int:
         conf_path = project_root / ".tamago" / PROJECT_CONF_NAME
         print(
             f"error   no tamago.conf found at {conf_path}\n"
-            f"        Create one from the template: cp $(tamago --source)/templates/tamago.conf.example .tamago/tamago.conf\n"
+            f"        Create one from the template: cp ~/.tamago/templates/tamago.conf.example .tamago/tamago.conf\n"
             f"        Then edit it and run: tamago install",
             file=sys.stderr,
         )

@@ -1987,15 +1987,15 @@ class CheckConfConflictsTests(unittest.TestCase):
     """Unit tests for _check_conf_conflicts — pure function, no filesystem."""
 
     def _make_conf(self, agents=(), skills=(), plugins=()):
-        """Build a TamagoConf from shorthand tuples (name, disable)."""
+        """Build a TamagoConf from agent/skill names and (name, disable) tuples for plugins."""
         return sm.TamagoConf(
-            agents=[sm.AgentEntry(name=n, disable=d) for n, d in agents],
-            skills=[sm.SkillEntry(name=n, disable=d) for n, d in skills],
+            agents=[sm.AgentEntry(name=n) for n in agents],
+            skills=[sm.SkillEntry(name=n) for n in skills],
             plugins=[sm.PluginEntry(name=n, repo="/fake", disable=d) for n, d in plugins],
         )
 
     def test_none_global_conf_returns_no_conflicts(self):
-        project = self._make_conf(agents=[("hammer.mei", False)])
+        project = self._make_conf(agents=["hammer.mei"])
         self.assertEqual(sm._check_conf_conflicts(None, project), [])
 
     def test_both_empty_returns_no_conflicts(self):
@@ -2004,21 +2004,21 @@ class CheckConfConflictsTests(unittest.TestCase):
         ), [])
 
     def test_disjoint_agents_no_conflict(self):
-        g = self._make_conf(agents=[("agent-a", False)])
-        p = self._make_conf(agents=[("agent-b", False)])
+        g = self._make_conf(agents=["agent-a"])
+        p = self._make_conf(agents=["agent-b"])
         self.assertEqual(sm._check_conf_conflicts(g, p), [])
 
     def test_same_agent_in_both_is_conflict(self):
-        g = self._make_conf(agents=[("hammer.mei", False)])
-        p = self._make_conf(agents=[("hammer.mei", False)])
+        g = self._make_conf(agents=["hammer.mei"])
+        p = self._make_conf(agents=["hammer.mei"])
         msgs = sm._check_conf_conflicts(g, p)
         self.assertEqual(len(msgs), 1)
         self.assertIn("hammer.mei", msgs[0])
         self.assertIn("agent", msgs[0])
 
     def test_same_skill_in_both_is_conflict(self):
-        g = self._make_conf(skills=[("nagori-skip", False)])
-        p = self._make_conf(skills=[("nagori-skip", False)])
+        g = self._make_conf(skills=["nagori-skip"])
+        p = self._make_conf(skills=["nagori-skip"])
         msgs = sm._check_conf_conflicts(g, p)
         self.assertEqual(len(msgs), 1)
         self.assertIn("nagori-skip", msgs[0])
@@ -2032,27 +2032,15 @@ class CheckConfConflictsTests(unittest.TestCase):
         self.assertIn("nagori", msgs[0])
         self.assertIn("plugin", msgs[0])
 
-    def test_disabled_item_in_global_does_not_conflict(self):
-        """A disabled entry in the global conf is being removed — no conflict."""
-        g = self._make_conf(agents=[("hammer.mei", True)])   # disabled in global
-        p = self._make_conf(agents=[("hammer.mei", False)])  # active in project
-        self.assertEqual(sm._check_conf_conflicts(g, p), [])
-
-    def test_disabled_item_in_project_does_not_conflict(self):
-        """A disabled entry in the project conf is being removed — no conflict."""
-        g = self._make_conf(agents=[("hammer.mei", False)])  # active in global
-        p = self._make_conf(agents=[("hammer.mei", True)])   # disabled in project
-        self.assertEqual(sm._check_conf_conflicts(g, p), [])
-
     def test_multiple_conflicts_all_reported(self):
         g = self._make_conf(
-            agents=[("a", False)],
-            skills=[("s", False)],
+            agents=["a"],
+            skills=["s"],
             plugins=[("p", False)],
         )
         p = self._make_conf(
-            agents=[("a", False)],
-            skills=[("s", False)],
+            agents=["a"],
+            skills=["s"],
             plugins=[("p", False)],
         )
         msgs = sm._check_conf_conflicts(g, p)
@@ -2245,13 +2233,13 @@ tts = false
             self.assertEqual(result, 0)
             self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "my.agent")
 
-    def test_disabled_agent_skipped_for_agent_name(self):
-        """A disabled [[agents]] entry must not be selected as the agent_name."""
+    def test_first_listed_agent_is_agent_name(self):
+        """The first [[agents]] entry in conf is selected as agent_name (default-agent pointer)."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text(
-                '[[agents]]\nname = "disabled.agent"\ndisable = true\n\n'
-                '[[agents]]\nname = "active.agent"\n'
+                '[[agents]]\nname = "first.agent"\n\n'
+                '[[agents]]\nname = "second.agent"\n'
             )
 
             with (
@@ -2265,7 +2253,7 @@ tts = false
                     Path(td) / "project",
                 )
 
-            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "active.agent")
+            self.assertEqual(mock_setup.call_args.kwargs["agent_name"], "first.agent")
 
     def test_no_agents_passes_none_agent_name(self):
         """When tamago.conf has no [[agents]], agent_name=None is passed to setup()."""
@@ -2345,8 +2333,8 @@ tts = false
                                     )
         self.assertEqual(rc, 0)
 
-    def test_disabled_global_item_does_not_block_install(self):
-        """A disabled entry in global conf does not trigger a conflict."""
+    def test_same_agent_in_global_and_project_is_conflict(self):
+        """Same agent name in both global and project conf blocks install (no disable escape hatch)."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
@@ -2357,27 +2345,17 @@ tts = false
             conf_path.parent.mkdir()
             conf_path.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
 
-            # Global conf has same name but disabled
             global_conf = Path(td) / "global.conf"
-            global_conf.write_text(
-                '[[agents]]\nname = "hammer.mei"\nsource = "tamago"\ndisable = true\n'
-            )
+            global_conf.write_text('[[agents]]\nname = "hammer.mei"\nsource = "tamago"\n')
 
-            with mock.patch.object(sm, "run_health_check"):
-                with mock.patch.object(sm, "setup") as mock_setup:
-                    mock_setup.return_value = 0
-                    with mock.patch.object(sm, "setup_external_skills", return_value=0):
-                        with mock.patch.object(sm, "setup_plugins", return_value=0):
-                            with mock.patch.object(sm, "_write_install_machine_toml"):
-                                with mock.patch.object(sm, "add_project_to_registry"):
-                                    rc = sm.install_from_conf(
-                                        conf_path,
-                                        sm.Operation.INSTALL,
-                                        source,
-                                        project,
-                                        global_conf_path=global_conf,
-                                    )
-        self.assertEqual(rc, 0)
+            rc = sm.install_from_conf(
+                conf_path,
+                sm.Operation.INSTALL,
+                source,
+                project,
+                global_conf_path=global_conf,
+            )
+        self.assertEqual(rc, 1)
 
     # ── Profile inheritance from global conf ─────────────────────────────────
 
@@ -3018,8 +2996,8 @@ class MainUpdateAndConfigTests(unittest.TestCase):
         self.assertTrue(mock_ifc.called, "install_from_conf should be called via auto-detect")
         self.assertEqual(mock_ifc.call_args.args[0], conf_path)
 
-    def test_install_no_auto_detect_when_conf_absent(self):
-        """'tamago install' without --config falls through to legacy path when no tamago.conf."""
+    def test_install_returns_error_when_conf_absent(self):
+        """'tamago install' exits with error code 1 and a helpful message when tamago.conf is missing."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
@@ -3032,8 +3010,9 @@ class MainUpdateAndConfigTests(unittest.TestCase):
                 mock.patch("sys.argv", ["setup.py", "install", "--source", td]),
                 mock.patch.object(sm.Path, "cwd", return_value=project),
             ):
-                sm.main()
+                result = sm.main()
 
+        self.assertEqual(result, 1, "main() should return 1 when tamago.conf is missing")
         self.assertFalse(mock_ifc.called, "install_from_conf should NOT be called — no tamago.conf")
 
 
@@ -4032,13 +4011,13 @@ class GlobalAgentScopeTests(unittest.TestCase):
             # install_globally must be False — project conf is always project-scoped
             self.assertFalse(captured.get("install_globally", False))
 
-    def test_disabled_agent_is_in_disabled_agents(self):
-        """A disabled agent (disable=true) appears in disabled_agents regardless of scope."""
+    def test_listed_agent_is_in_enabled_agents(self):
+        """An agent listed in [[agents]] appears in enabled_agents passed to setup()."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
-            conf_path.write_text(
-                '[[agents]]\nname = "hammer.mei"\nscope = "global"\ndisable = true\n'
-            )
+            conf_path.write_text('[[agents]]\nname = "hammer.mei"\n')
+            empty_global = Path(td) / "global.conf"
+            empty_global.write_text("# empty\n")
             project_root = Path(td) / "project"
             registry = Path(td) / "registry.json"
 
@@ -4046,7 +4025,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             def fake_setup(*args, **kwargs):
                 captured["install_globally"] = kwargs.get("install_globally")
-                captured["disabled_agents"] = kwargs.get("disabled_agents")
+                captured["enabled_agents"] = kwargs.get("enabled_agents")
                 return 0
 
             with (
@@ -4059,10 +4038,11 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     Path(td) / "source",
                     project_root,
                     registry_path=registry,
+                    global_conf_path=empty_global,
                 )
 
             self.assertFalse(captured.get("install_globally", False))
-            self.assertIn("hammer.mei", captured.get("disabled_agents", set()))
+            self.assertIn("hammer.mei", captured.get("enabled_agents", set()))
 
     def test_global_persona_agent_merged_to_home_dir(self):
         """A persona agent with scope='global' is generated in ~/.claude/agents/."""
@@ -4109,6 +4089,81 @@ class GlobalAgentScopeTests(unittest.TestCase):
             # NOT in project dir
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
 
+    def test_global_opencode_plugins_go_to_home_not_project(self):
+        """OpenCode plugins with install_globally=True land at ~/.opencode/plugins/, not project_root/.opencode/plugins/."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, [])
+            # Add an OpenCode plugin file
+            plugin_dir = source / "settings" / "opencode" / "plugins"
+            (plugin_dir / "my-plugin.ts").write_text("// plugin\n")
+
+            project = root / "project"
+            home_root = root / "home"
+            home_opencode_plugins = home_root / ".opencode" / "plugins"
+
+            orig_expanduser = Path.expanduser
+
+            def fake_expanduser(self):
+                s = str(self)
+                if s.startswith("~"):
+                    return Path(str(home_root) + s[1:])
+                return orig_expanduser(self)
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                sm.setup_agents(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    install_globally=True,
+                )
+
+            # Plugin must be at ~/.opencode/plugins/, NOT at project/.opencode/plugins/
+            self.assertTrue(
+                (home_opencode_plugins / "my-plugin.ts").is_symlink(),
+                "Expected plugin symlink at ~/.opencode/plugins/ for global install",
+            )
+            self.assertFalse(
+                (project / ".opencode" / "plugins" / "my-plugin.ts").exists(),
+                "Plugin must NOT be placed in project_root/.opencode/plugins/ for global install",
+            )
+
+    def test_uninstall_global_opencode_plugins_removes_from_home(self):
+        """Uninstalling with install_globally=True removes plugins from ~/.opencode/plugins/."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, [])
+            plugin_dir = source / "settings" / "opencode" / "plugins"
+            (plugin_dir / "my-plugin.ts").write_text("// plugin\n")
+
+            project = root / "project"
+            home_root = root / "home"
+            home_opencode_plugins = home_root / ".opencode" / "plugins"
+            home_opencode_plugins.mkdir(parents=True)
+            # Pre-place a symlink as if install already ran
+            (home_opencode_plugins / "my-plugin.ts").symlink_to(plugin_dir / "my-plugin.ts")
+
+            orig_expanduser = Path.expanduser
+
+            def fake_expanduser(self):
+                s = str(self)
+                if s.startswith("~"):
+                    return Path(str(home_root) + s[1:])
+                return orig_expanduser(self)
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                sm.setup_agents(
+                    sm.Operation.UNINSTALL,
+                    source,
+                    project,
+                    install_globally=True,
+                )
+
+            self.assertFalse(
+                (home_opencode_plugins / "my-plugin.ts").exists(),
+                "Uninstall should remove plugin from ~/.opencode/plugins/",
+            )
+
 
 HEALTH_CHECK_SH = Path(__file__).with_name("scripts") / "health-check.sh"
 
@@ -4152,27 +4207,29 @@ def _skill_result(data: dict, name: str) -> str | None:
 
 
 class HealthCheckSkillScopeTests(unittest.TestCase):
-    """Verify health-check.sh correctly locates skills based on source + agent scope.
+    """Verify health-check.sh correctly locates skills based on conf file + source + agent scope.
 
     Scope rules under test:
-      1. Tamago built-in skills always at ~/.claude/skills/ (even with project-scoped agent)
-      2. Profile skills follow agent scope:
+      1. Skills listed in global conf (~/.tamago/tamago.conf) → always ~/.claude/skills/
+      2. Tamago built-in skills in project conf → always ~/.claude/skills/
+      3. Profile skills in project conf follow agent scope:
            global agent  → ~/.claude/skills/
            project agent → project/.claude/skills/
-      3. explicit scope="project" in [[skills]] → project level regardless of source
+      4. Skills absent from both confs are silently skipped (not flagged as missing)
     """
 
     def _setup_env(self, root: Path, tamago_skills: list[str], profile_skills: list[str],
                    agent_scope: str = "project", agent_name: str = "test-agent",
-                   project_scoped_skills: list[str] | None = None,
-                   disabled_skills: list[str] | None = None) -> tuple[Path, Path, Path, Path]:
+                   global_skills: list[str] | None = None,
+                   excluded_skills: list[str] | None = None) -> tuple[Path, Path, Path, Path]:
         """Build a fake tamago/profile/home/project tree and return (tamago, profile, home, project)."""
         tamago = root / "tamago"
         profile = root / "profile"
         home = root / "home"
         project = root / "project"
 
-        # tamago skill dirs
+        # tamago skill dirs (always create the parent so setup_skills doesn't error on missing dir)
+        (tamago / "skills").mkdir(parents=True, exist_ok=True)
         for name in tamago_skills:
             (tamago / "skills" / name).mkdir(parents=True)
 
@@ -4186,18 +4243,39 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
             json.dumps({"agent": agent_name})
         )
 
-        # tamago.conf in project
+        # tamago.conf in project and (optionally) global conf in tamago dir.
+        # Scope is determined by which conf file the skill is listed in:
+        #   global_skills → written to tamago/tamago.conf (global conf) → always ~/.claude/skills/
+        #   remaining skills (not excluded, not global) → written to project conf
+        #   excluded_skills: intentionally absent from both confs (not listed = not installed)
         (project / ".tamago").mkdir(parents=True)
-        extra_skill_lines = ""
-        if project_scoped_skills:
-            for s in project_scoped_skills:
-                extra_skill_lines += f'\n[[skills]]\nname = "{s}"\nscope = "project"\n'
-        if disabled_skills:
-            for s in disabled_skills:
-                extra_skill_lines += f'\n[[skills]]\nname = "{s}"\ndisable = true\n'
+        excluded_set = set(excluded_skills or [])
+        global_set = set(global_skills or [])
+
+        # Project conf: agent + skills not in global_set and not excluded
+        project_skill_lines = ""
+        for s in tamago_skills:
+            if s in excluded_set or s in global_set:
+                continue
+            project_skill_lines += f'\n[[skills]]\nname = "{s}"\nsource = "tamago"\n'
+        for s in profile_skills:
+            if s in excluded_set or s in global_set:
+                continue
+            project_skill_lines += f'\n[[skills]]\nname = "{s}"\nsource = "profile"\n'
         (project / ".tamago" / "tamago.conf").write_text(
-            f'[[agents]]\nname = "{agent_name}"\nscope = "{agent_scope}"\n{extra_skill_lines}'
+            f'[[agents]]\nname = "{agent_name}"\nscope = "{agent_scope}"\n{project_skill_lines}'
         )
+
+        # Global conf: skills listed in global_set (written to tamago/tamago.conf)
+        global_skill_lines = ""
+        for s in tamago_skills:
+            if s in global_set:
+                global_skill_lines += f'\n[[skills]]\nname = "{s}"\nsource = "tamago"\n'
+        for s in profile_skills:
+            if s in global_set:
+                global_skill_lines += f'\n[[skills]]\nname = "{s}"\nsource = "profile"\n'
+        if global_skill_lines:
+            (tamago / "tamago.conf").write_text(global_skill_lines)
         # machine.env so health check knows the profile
         (project / ".tamago" / "machine.env").write_text(
             f'PROFILE_REPO="{profile}"\n'
@@ -4320,26 +4398,41 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
             self.assertEqual(_skill_result(data, "agent-skill"), "pass",
                              f"Expected agent-skill to pass; full results: {data['results']}")
 
-    def test_explicit_project_scope_override_for_tamago_builtin(self):
-        """scope='project' in [[skills]] makes health check look at project dir for tamago built-ins."""
+    def test_global_conf_skill_checked_globally_regardless_of_agent_scope(self):
+        """Skills in global conf are always checked at ~/.claude/skills/ even with project-scoped agent."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             tamago, profile, home, project = self._setup_env(
                 root, tamago_skills=["tts"], profile_skills=[], agent_scope="project",
-                project_scoped_skills=["tts"],
+                global_skills=["tts"],  # listed in global conf → always global
             )
-            # Correctly installed at project level due to explicit override
-            self._install_skill_project(project, "tts", tamago / "skills" / "tts")
+            # Correctly installed at global level (from global conf → install_global_from_conf)
+            self._install_skill_global(home, "tts", tamago / "skills" / "tts")
 
             data = _run_health_check(project, tamago, home, profile)
             self.assertEqual(_skill_result(data, "tts"), "pass",
-                             f"Expected tts to pass at project level; full results: {data['results']}")
+                             f"Expected tts to pass at global level (from global conf); full results: {data['results']}")
 
-    def test_disabled_skill_passes_without_symlink(self):
-        """Regression: disable=true in [[skills]] must not be flagged as missing.
+    def test_global_conf_skill_fails_if_only_at_project_level(self):
+        """Skills in global conf fail health check if found only at project level."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=["tts"], profile_skills=[], agent_scope="project",
+                global_skills=["tts"],  # listed in global conf → expect ~/.claude/skills/
+            )
+            # Installed at project level (wrong location for a global-conf skill)
+            self._install_skill_project(project, "tts", tamago / "skills" / "tts")
 
-        Previously health-check.sh ignored the disable flag and checked the symlink
-        location, producing a false ❌ for intentionally-disabled skills.
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "tts"), "fail",
+                             f"Expected tts to fail (wrong location for global-conf skill); full results: {data['results']}")
+
+    def test_unlisted_skill_passes_health_check(self):
+        """A skill not listed in [[skills]] (not installed) must not be flagged as missing.
+
+        Health check should only flag skills that are listed in conf but symlink is absent.
+        An unlisted skill is simply not installed — that is intentional and correct.
         """
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -4348,14 +4441,88 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
                 tamago_skills=["text-to-speech"],
                 profile_skills=[],
                 agent_scope="project",
-                disabled_skills=["text-to-speech"],
+                excluded_skills=["text-to-speech"],  # not listed in conf → not installed
             )
-            # Intentionally NOT installed anywhere — the skill is disabled
+            # Intentionally NOT installed — not in conf
 
             data = _run_health_check(project, tamago, home, profile)
             result = _skill_result(data, "text-to-speech")
-            self.assertEqual(result, "pass",
-                             f"Expected text-to-speech to pass (disabled); full results: {data['results']}")
+            # Unlisted skill is simply not checked — absent from results entirely (not flagged as fail)
+            self.assertIsNone(result,
+                              f"Expected text-to-speech to be absent from results (unlisted); full results: {data['results']}")
+
+    def test_round_trip_setup_skills_then_health_check_passes(self):
+        """setup_skills installs a profile skill where health-check.sh expects it (project scope).
+
+        This is a round-trip test: setup_skills runs first, then health-check.sh verifies
+        the symlink is in the location it expects — no manual symlink creation.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=["agent-skill"], agent_scope="project"
+            )
+
+            # Use setup_skills to actually install the skill (not manually symlink)
+            import sys
+            orig_expanduser = Path.expanduser
+
+            def fake_expanduser(self):
+                s = str(self)
+                if s.startswith("~"):
+                    return Path(str(home) + s[1:])
+                return orig_expanduser(self)
+
+            with mock.patch.object(Path, "expanduser", fake_expanduser):
+                sm.setup_skills(
+                    sm.Operation.INSTALL,
+                    tamago,
+                    project,
+                    profile,
+                    enabled_skills={"agent-skill"},
+                    install_globally=False,  # project agent → profile skills at project scope
+                )
+
+            # Health check should now pass without any manual symlink placement
+            data = _run_health_check(project, tamago, home, profile)
+            self.assertEqual(_skill_result(data, "agent-skill"), "pass",
+                             f"Round-trip: setup_skills → health-check should pass; results: {data['results']}")
+
+    def test_json_mode_newline_in_message_produces_valid_json(self):
+        """health-check.sh --json output is valid JSON even when an error message contains a newline.
+
+        The _json_escape function must escape \\n (and tabs) so they don't break JSON parsing.
+        This test exercises the escape path by running health-check.sh in a minimal env where a
+        failure message is injected via a repo path that contains a literal newline.
+        """
+        import json as _json
+
+        # Run a bash snippet that sources just the _json_escape function from health-check.sh
+        # and verifies it turns a newline into \\n so the result is embeddable in JSON.
+        hc_path = str(HEALTH_CHECK_SH)
+        result = subprocess.run(
+            ["bash", "-c", rf"""
+set -e
+# Extract and define _json_escape from the real health-check.sh using sed range
+eval "$(sed -n '/^_json_escape()/,/^}}/p' {hc_path})"
+# Build a message containing a literal newline and a tab
+msg=$(printf 'first line\nsecond line\ttabbed')
+escaped=$(_json_escape "$msg")
+printf '%s' "{{\"msg\":\"$escaped\"}}"
+"""],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0,
+                         f"bash snippet failed:\nstdout={result.stdout!r}\nstderr={result.stderr!r}")
+        try:
+            parsed = _json.loads(result.stdout)
+        except _json.JSONDecodeError as e:
+            self.fail(
+                f"_json_escape output produced invalid JSON: {e}\n"
+                f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+            )
+        self.assertIn("\n", parsed["msg"], "Decoded message should contain a literal newline")
+        self.assertIn("\t", parsed["msg"], "Decoded message should contain a literal tab")
 
 
 class SkillScopeRoutingTests(unittest.TestCase):
@@ -4580,8 +4747,8 @@ class SkillScopeRoutingTests(unittest.TestCase):
             self.assertFalse((project / ".claude" / "skills" / "tts").exists())
 
 
-class DisableSkillTests(unittest.TestCase):
-    """Tests for disable=true in [[skills]] entries."""
+class SkillWhitelistTests(unittest.TestCase):
+    """Tests for whitelist semantics in [[skills]] entries."""
 
     def _make_source(self, root: Path, skill_names: list[str]) -> Path:
         """Create a tamago source tree with the given skill dirs."""
@@ -4590,135 +4757,129 @@ class DisableSkillTests(unittest.TestCase):
             (source / "skills" / name).mkdir(parents=True)
         return source
 
-    def test_load_tamago_conf_parses_disable_true_for_skill(self):
+    def _fake_expanduser(self, root: Path):
+        orig = Path.expanduser
+        def _inner(self_path):
+            s = str(self_path)
+            if s.startswith("~"):
+                return Path(str(root / "home") + s[1:])
+            return orig(self_path)
+        return _inner
+
+    def test_load_tamago_conf_skill_with_disable_warns_and_still_loads(self):
+        """A [[skills]] entry with 'disable' key emits a warning but still loads the skill."""
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "tamago.conf"
             p.write_text('[[skills]]\nname = "foo"\ndisable = true\n')
-            conf = sm.load_tamago_conf(p)
+            stderr_out = io.StringIO()
+            with contextlib.redirect_stderr(stderr_out):
+                conf = sm.load_tamago_conf(p)
             self.assertIsNotNone(conf)
             self.assertEqual(len(conf.skills), 1)
-            self.assertTrue(conf.skills[0].disable)
+            self.assertEqual(conf.skills[0].name, "foo")
+            self.assertIn("disable", stderr_out.getvalue())
+            self.assertIn("no longer supported", stderr_out.getvalue())
 
-    def test_load_tamago_conf_disable_defaults_to_false(self):
+    def test_load_tamago_conf_skill_without_disable_loads_cleanly(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "tamago.conf"
             p.write_text('[[skills]]\nname = "foo"\n')
             conf = sm.load_tamago_conf(p)
             self.assertIsNotNone(conf)
-            self.assertFalse(conf.skills[0].disable)
+            self.assertEqual(conf.skills[0].name, "foo")
 
-    def test_disabled_skill_is_not_symlinked(self):
-        """A skill in disabled_skills must not be symlinked on install."""
+    def test_disable_true_skill_still_installed(self):
+        """disable=true in [[skills]] is ignored — the skill IS installed (with a warning).
+
+        load_tamago_conf still loads the skill into conf.skills; the enabled_skills set
+        therefore contains it; setup_skills installs it.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tamago.conf"
+            p.write_text('[[skills]]\nname = "foo"\nsource = "tamago"\ndisable = true\n')
+            import io, contextlib
+            stderr_out = io.StringIO()
+            with contextlib.redirect_stderr(stderr_out):
+                conf = sm.load_tamago_conf(p)
+
+            # conf.skills still has "foo"
+            self.assertEqual([s.name for s in conf.skills], ["foo"],
+                             "skill with disable=true should be loaded into conf")
+
+            # enabled_skills derived from conf includes "foo"
+            enabled = {s.name for s in conf.skills}
+            self.assertIn("foo", enabled, "foo should be in enabled_skills despite disable=true")
+
+    def test_only_listed_skills_installed(self):
+        """With enabled_skills whitelist, only listed skills are symlinked."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, ["keep-skill", "skip-skill"])
             project = root / "project"
             home_claude_skills = root / "home" / ".claude" / "skills"
 
-            orig_expanduser = Path.expanduser
-
-            def fake_expanduser(self):
-                s = str(self)
-                if s.startswith("~"):
-                    return Path(str(root / "home") + s[1:])
-                return orig_expanduser(self)
-
-            with mock.patch.object(Path, "expanduser", fake_expanduser):
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
                 sm.setup_skills(
                     sm.Operation.INSTALL,
                     source,
                     project,
-                    disabled_skills={"skip-skill"},
+                    enabled_skills={"keep-skill"},
                 )
 
-            # Built-in skills always go to global ~/.claude/skills/
             self.assertTrue((home_claude_skills / "keep-skill").is_symlink())
             self.assertFalse((home_claude_skills / "skip-skill").exists())
-            self.assertFalse((root / "home" / ".opencode" / "skills" / "skip-skill").exists())
 
-    def test_existing_symlink_removed_when_skill_disabled(self):
-        """If a skill is disabled after having been installed, the old symlink is removed."""
+    def test_empty_enabled_skills_installs_nothing(self):
+        """With enabled_skills=set(), no skills are installed."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            source = self._make_source(root, ["my-skill"])
+            source = self._make_source(root, ["skill-a", "skill-b"])
             project = root / "project"
             home_claude_skills = root / "home" / ".claude" / "skills"
 
-            orig_expanduser = Path.expanduser
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_skills(
+                    sm.Operation.INSTALL,
+                    source,
+                    project,
+                    enabled_skills=set(),
+                )
 
-            def fake_expanduser(self):
-                s = str(self)
-                if s.startswith("~"):
-                    return Path(str(root / "home") + s[1:])
-                return orig_expanduser(self)
+            self.assertFalse((home_claude_skills / "skill-a").exists())
+            self.assertFalse((home_claude_skills / "skill-b").exists())
 
-            with mock.patch.object(Path, "expanduser", fake_expanduser):
-                # First install without disable
-                sm.setup_skills(sm.Operation.INSTALL, source, project)
-                self.assertTrue((home_claude_skills / "my-skill").is_symlink())
-
-                # Re-install with disable
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    sm.setup_skills(
-                        sm.Operation.INSTALL,
-                        source,
-                        project,
-                        disabled_skills={"my-skill"},
-                    )
-            self.assertFalse((home_claude_skills / "my-skill").exists())
-            self.assertFalse((root / "home" / ".opencode" / "skills" / "my-skill").exists())
-            self.assertIn("disabled", out.getvalue())
-
-    def test_disabled_external_skill_removes_symlink_and_skips_clone(self):
-        """Disabled URL skill: remove existing symlink, do not clone."""
+    def test_none_enabled_skills_installs_all(self):
+        """With enabled_skills=None (default), all skills are installed."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            source = self._make_source(root, ["skill-a", "skill-b"])
             project = root / "project"
-            skill_dir = root / "cached-skill"
-            skill_dir.mkdir()
+            home_claude_skills = root / "home" / ".claude" / "skills"
 
-            # Pre-create symlinks (simulating a previously-installed URL skill)
-            for rel in (".claude/skills", ".opencode/skills"):
-                sr = project / rel
-                sr.mkdir(parents=True)
-                (sr / "my-skill").symlink_to(skill_dir)
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_skills(sm.Operation.INSTALL, source, project)
 
-            skill = sm.SkillEntry(
-                name="my-skill",
-                source="https://example.com/my-skill.git",
-                disable=True,
-            )
-            out = io.StringIO()
-            with (
-                contextlib.redirect_stdout(out),
-                mock.patch.object(sm, "_resolve_external_skill_dir") as mock_resolve,
-            ):
-                rc = sm.setup_external_skills(
-                    sm.Operation.INSTALL, [skill], project
-                )
+            self.assertTrue((home_claude_skills / "skill-a").is_symlink())
+            self.assertTrue((home_claude_skills / "skill-b").is_symlink())
 
-            self.assertEqual(rc, 0)
-            mock_resolve.assert_not_called()
-            self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
-            self.assertFalse((project / ".opencode" / "skills" / "my-skill").exists())
-            self.assertIn("disabled", out.getvalue())
-
-    def test_disabled_external_skill_not_cloned_when_no_existing_symlink(self):
-        """Disabled URL skill with no pre-existing symlink: skip silently, don't clone."""
+    def test_external_skill_listed_is_installed(self):
+        """A URL skill listed in conf is cloned and symlinked."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
+            skill_dir = Path(td) / "cached-skill"
+            skill_dir.mkdir()
+
             skill = sm.SkillEntry(
                 name="my-skill",
                 source="https://example.com/my-skill.git",
-                disable=True,
             )
-            with mock.patch.object(sm, "_resolve_external_skill_dir") as mock_resolve:
+            with mock.patch.object(sm, "_resolve_external_skill_dir", return_value=skill_dir):
                 rc = sm.setup_external_skills(
                     sm.Operation.INSTALL, [skill], project
                 )
+
             self.assertEqual(rc, 0)
-            mock_resolve.assert_not_called()
+            self.assertTrue((project / ".claude" / "skills" / "my-skill").is_symlink())
 
 
 class DisableAgentTests(unittest.TestCase):
@@ -4737,25 +4898,32 @@ class DisableAgentTests(unittest.TestCase):
         (source / "settings" / "opencode" / "plugins").mkdir(parents=True)
         return source
 
-    def test_load_tamago_conf_parses_disable_true_for_agent(self):
+    def test_load_tamago_conf_agent_with_disable_warns_and_still_loads(self):
+        """An [[agents]] entry with 'disable' key emits a warning but still loads the agent."""
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "tamago.conf"
             p.write_text('[[agents]]\nname = "hammer.mei"\ndisable = true\n')
-            conf = sm.load_tamago_conf(p)
+            stderr_out = io.StringIO()
+            with contextlib.redirect_stderr(stderr_out):
+                conf = sm.load_tamago_conf(p)
             self.assertIsNotNone(conf)
+            # Agent is still parsed (not silently dropped)
             self.assertEqual(len(conf.agents), 1)
-            self.assertTrue(conf.agents[0].disable)
+            self.assertEqual(conf.agents[0].name, "hammer.mei")
+            # Warning emitted
+            self.assertIn("disable", stderr_out.getvalue())
+            self.assertIn("no longer supported", stderr_out.getvalue())
 
-    def test_load_tamago_conf_agent_disable_defaults_to_false(self):
+    def test_load_tamago_conf_agent_without_disable_loads_cleanly(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "tamago.conf"
             p.write_text('[[agents]]\nname = "hammer.mei"\n')
             conf = sm.load_tamago_conf(p)
             self.assertIsNotNone(conf)
-            self.assertFalse(conf.agents[0].disable)
+            self.assertEqual(conf.agents[0].name, "hammer.mei")
 
-    def test_disabled_tamago_agent_not_symlinked(self):
-        """A tamago built-in agent in disabled_agents must not be symlinked."""
+    def test_only_listed_tamago_agents_installed(self):
+        """With enabled_agents whitelist, only listed agents are symlinked."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, ["code-reviewer", "plan"])
@@ -4765,39 +4933,44 @@ class DisableAgentTests(unittest.TestCase):
                 sm.Operation.INSTALL,
                 source,
                 project,
-                disabled_agents={"code-reviewer"},
+                enabled_agents={"plan"},
             )
 
             self.assertFalse((project / ".claude" / "agents" / "code-reviewer.md").exists())
             self.assertFalse((project / ".opencode" / "agents" / "code-reviewer.md").exists())
             self.assertTrue((project / ".claude" / "agents" / "plan.md").is_symlink())
 
-    def test_existing_symlink_removed_for_disabled_tamago_agent(self):
-        """On re-install with disable, the old agent symlink is removed."""
+    def test_empty_enabled_agents_installs_nothing(self):
+        """With enabled_agents=set(), no agents are installed."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            source = self._make_source(root, ["code-reviewer"])
+            source = self._make_source(root, ["code-reviewer", "plan"])
             project = root / "project"
 
-            # First install without disable
-            sm.setup_agents(sm.Operation.INSTALL, source, project)
-            self.assertTrue((project / ".claude" / "agents" / "code-reviewer.md").is_symlink())
+            sm.setup_agents(
+                sm.Operation.INSTALL,
+                source,
+                project,
+                enabled_agents=set(),
+            )
 
-            # Re-install with disable
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                sm.setup_agents(
-                    sm.Operation.INSTALL,
-                    source,
-                    project,
-                    disabled_agents={"code-reviewer"},
-                )
             self.assertFalse((project / ".claude" / "agents" / "code-reviewer.md").exists())
-            self.assertFalse((project / ".opencode" / "agents" / "code-reviewer.md").exists())
-            self.assertIn("disabled", out.getvalue())
+            self.assertFalse((project / ".claude" / "agents" / "plan.md").exists())
 
-    def test_disabled_persona_agent_not_generated(self):
-        """A persona agent in disabled_agents must not have its .md generated."""
+    def test_none_enabled_agents_installs_all(self):
+        """With enabled_agents=None (default), all agents are installed."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["code-reviewer", "plan"])
+            project = root / "project"
+
+            sm.setup_agents(sm.Operation.INSTALL, source, project)
+
+            self.assertTrue((project / ".claude" / "agents" / "code-reviewer.md").is_symlink())
+            self.assertTrue((project / ".claude" / "agents" / "plan.md").is_symlink())
+
+    def test_unlisted_persona_agent_not_generated(self):
+        """A persona agent not in enabled_agents must not have its .md generated."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, [])
@@ -4806,11 +4979,14 @@ class DisableAgentTests(unittest.TestCase):
             (source / "docs").mkdir(parents=True)
             (source / "docs" / "tamago-agent-base.md").write_text("# Base\n")
 
-            # Profile with persona file
+            # Profile with two persona files
             profile = root / "hammer.mei-profile"
             (profile / "agents").mkdir(parents=True)
             (profile / "agents" / "hammer.mei.persona.md").write_text(
                 "---\nname: hammer.mei\n---\n# Persona\n"
+            )
+            (profile / "agents" / "wave.bro.persona.md").write_text(
+                "---\nname: wave.bro\n---\n# Persona\n"
             )
 
             project = root / "project"
@@ -4819,52 +4995,17 @@ class DisableAgentTests(unittest.TestCase):
                 source,
                 project,
                 profile_root=profile,
-                disabled_agents={"hammer.mei"},
+                enabled_agents={"wave.bro"},
             )
 
+            # hammer.mei not in whitelist → not generated
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
             self.assertFalse((project / ".opencode" / "agents" / "hammer.mei.md").exists())
+            # wave.bro in whitelist → generated
+            self.assertTrue((project / ".claude" / "agents" / "wave.bro.md").exists())
 
-    def test_generated_file_removed_when_persona_agent_disabled(self):
-        """On re-install with persona disabled, the previously-generated .md is removed."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            source = self._make_source(root, [])
-            (source / "docs").mkdir(parents=True)
-            (source / "docs" / "tamago-agent-base.md").write_text("# Base\n")
-
-            profile = root / "hammer.mei-profile"
-            (profile / "agents").mkdir(parents=True)
-            (profile / "agents" / "hammer.mei.persona.md").write_text(
-                "---\nname: hammer.mei\n---\n# Persona\n"
-            )
-
-            project = root / "project"
-
-            # First install (generates the file)
-            sm.setup_agents(
-                sm.Operation.INSTALL, source, project, profile_root=profile
-            )
-            generated = project / ".claude" / "agents" / "hammer.mei.md"
-            self.assertTrue(generated.exists())
-            self.assertIn(sm.GENERATED_HEADER_MARKER, generated.read_text()[:300])
-
-            # Re-install with disable
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                sm.setup_agents(
-                    sm.Operation.INSTALL,
-                    source,
-                    project,
-                    profile_root=profile,
-                    disabled_agents={"hammer.mei"},
-                )
-            self.assertFalse(generated.exists())
-            self.assertFalse((project / ".opencode" / "agents" / "hammer.mei.md").exists())
-            self.assertIn("disabled", out.getvalue())
-
-    def test_disabled_agent_memory_not_symlinked(self):
-        """Memory dir for a disabled agent must not be symlinked."""
+    def test_unlisted_agent_memory_not_symlinked(self):
+        """Memory dir for an agent not in enabled_agents must not be symlinked."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, [])
@@ -4880,23 +5021,107 @@ class DisableAgentTests(unittest.TestCase):
                 source,
                 project,
                 profile_root=profile,
-                disabled_agents={"hammer.mei"},
+                enabled_agents={"other-agent"},
             )
 
             mem_root = project / ".claude" / "agent-memory"
-            # hammer.mei memory should NOT be symlinked (neither form)
+            # hammer.mei not in whitelist → not symlinked (neither form)
             self.assertFalse((mem_root / "hammer.mei").exists())
             self.assertFalse((mem_root / "hammer-mei").exists())
-            # other-agent memory SHOULD be symlinked
+            # other-agent in whitelist → symlinked
             self.assertTrue((mem_root / "other-agent").is_symlink())
 
-    def test_install_from_conf_builds_disabled_sets(self):
-        """install_from_conf extracts disabled names and passes them to setup()."""
+    def test_disable_true_agent_still_installed(self):
+        """disable=true in [[agents]] is ignored — the agent IS installed (with a warning)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["plan"])
+            project = root / "project"
+
+            sm.setup_agents(
+                sm.Operation.INSTALL,
+                source,
+                project,
+                enabled_agents={"plan"},  # simulate what load_tamago_conf produces
+            )
+
+            # 'disable' key is gone from AgentEntry; agent_names includes "plan" → installed
+            self.assertTrue((project / ".claude" / "agents" / "plan.md").is_symlink(),
+                            "agent with disable=true in conf should still be installed")
+
+    def test_orphan_agent_files_survive_whitelist_change(self):
+        """Agent files installed previously remain on disk when removed from the whitelist.
+
+        setup_agents only touches agents in enabled_agents — removing an agent from conf
+        and re-running install does NOT delete its files (they become orphans).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_source(root, ["plan", "general"])
+            project = root / "project"
+
+            # First install: both agents
+            sm.setup_agents(sm.Operation.INSTALL, source, project, enabled_agents={"plan", "general"})
+            self.assertTrue((project / ".claude" / "agents" / "plan.md").is_symlink())
+            self.assertTrue((project / ".claude" / "agents" / "general.md").is_symlink())
+
+            # Second install: "general" removed from whitelist (removed from conf)
+            sm.setup_agents(sm.Operation.INSTALL, source, project, enabled_agents={"plan"})
+
+            # "plan" still installed; "general" left as orphan (not deleted)
+            self.assertTrue((project / ".claude" / "agents" / "plan.md").is_symlink(),
+                            "plan should still be installed")
+            self.assertTrue((project / ".claude" / "agents" / "general.md").is_symlink(),
+                            "general should survive as orphan — setup_agents does not prune unlisted agents")
+
+    def test_install_global_from_conf_builds_enabled_agents_set(self):
+        """install_global_from_conf derives enabled_agents and enabled_skills whitelists from global conf."""
+        with tempfile.TemporaryDirectory() as td:
+            conf_path = Path(td) / "global.conf"
+            conf_path.write_text(
+                '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
+                '[[agents]]\nname = "code-reviewer"\nsource = "tamago"\n'
+                '[[skills]]\nname = "text-to-speech"\nsource = "tamago"\n'
+            )
+            captured: dict = {}
+
+            def fake_setup_agents(op, source, project, profile=None, **kwargs):
+                if "enabled_agents" in kwargs:
+                    captured["enabled_agents"] = kwargs["enabled_agents"]
+
+            def fake_setup_skills(op, source, project, profile, enabled, **kwargs):
+                captured.setdefault("enabled_skills", set())
+                if enabled is not None:
+                    captured["enabled_skills"] |= enabled
+
+            noop = mock.MagicMock(return_value=None)
+            with (
+                mock.patch.object(sm, "setup_agents", side_effect=fake_setup_agents),
+                mock.patch.object(sm, "setup_skills", side_effect=fake_setup_skills),
+                mock.patch.object(sm, "patch_global_settings", noop),
+                mock.patch.object(sm, "patch_opencode_global_settings", noop),
+                mock.patch.object(sm, "setup_shell_env", noop),
+                mock.patch.object(sm, "setup_git_hooks", noop),
+                mock.patch.object(sm, "setup_local_bin", noop),
+                mock.patch.object(sm, "_setup_bootstrap_skill", noop),
+                mock.patch.object(sm, "_write_install_machine_toml", noop),
+            ):
+                sm.install_global_from_conf(
+                    conf_path, sm.Operation.INSTALL, Path(td) / "source",
+                )
+
+            self.assertEqual(captured.get("enabled_agents"), {"hammer.mei", "code-reviewer"})
+            self.assertEqual(captured.get("enabled_skills"), {"text-to-speech"})
+
+    def test_install_from_conf_builds_enabled_sets(self):
+        """install_from_conf derives enabled_agents and enabled_skills whitelists."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             conf_path.write_text(
-                '[[agents]]\nname = "code-reviewer"\ndisable = true\n'
-                '[[skills]]\nname = "cmux-markdown"\ndisable = true\n'
+                '[[agents]]\nname = "code-reviewer"\n'
+                '[[agents]]\nname = "plan"\n'
+                '[[skills]]\nname = "cmux-markdown"\n'
+                '[[skills]]\nname = "hatch"\n'
             )
             project_root = Path(td) / "project"
             registry = Path(td) / "registry.json"
@@ -4904,8 +5129,8 @@ class DisableAgentTests(unittest.TestCase):
             captured: dict = {}
 
             def fake_setup(*args, **kwargs):
-                captured["disabled_agents"] = kwargs.get("disabled_agents")
-                captured["disabled_skills"] = kwargs.get("disabled_skills")
+                captured["enabled_agents"] = kwargs.get("enabled_agents")
+                captured["enabled_skills"] = kwargs.get("enabled_skills")
                 return 0
 
             with (
@@ -4920,11 +5145,11 @@ class DisableAgentTests(unittest.TestCase):
                     registry_path=registry,
                 )
 
-            self.assertEqual(captured["disabled_agents"], {"code-reviewer"})
-            self.assertEqual(captured["disabled_skills"], {"cmux-markdown"})
+            self.assertEqual(captured["enabled_agents"], {"code-reviewer", "plan"})
+            self.assertEqual(captured["enabled_skills"], {"cmux-markdown", "hatch"})
 
     def test_install_from_conf_passes_agent_names_to_setup(self):
-        """install_from_conf collects all non-disabled agents and passes agent_names to setup."""
+        """install_from_conf collects all listed agents and passes agent_names to setup."""
         with tempfile.TemporaryDirectory() as td:
             conf_path = Path(td) / "tamago.conf"
             empty_global = Path(td) / "global.conf"
@@ -4932,7 +5157,6 @@ class DisableAgentTests(unittest.TestCase):
             conf_path.write_text(
                 '[[agents]]\nname = "hammer.mei"\nsource = "profile"\n'
                 '[[agents]]\nname = "wave.bro"\nsource = "profile"\n'
-                '[[agents]]\nname = "gone-agent"\nsource = "profile"\ndisable = true\n'
             )
             project_root = Path(td) / "project"
             registry = Path(td) / "registry.json"
@@ -4957,13 +5181,13 @@ class DisableAgentTests(unittest.TestCase):
                     global_conf_path=empty_global,
                 )
 
-            # First non-disabled agent is the default-agent pointer
+            # First listed agent is the default-agent pointer
             self.assertEqual(captured["agent_name"], "hammer.mei")
-            # All non-disabled agents are in the list
+            # All listed agents are in the list
             self.assertEqual(captured["agent_names"], ["hammer.mei", "wave.bro"])
 
     def test_install_from_conf_machine_env_contains_all_agent_names(self):
-        """machine.env written by install_from_conf includes AGENT_NAMES for all non-disabled agents."""
+        """machine.env written by install_from_conf includes AGENT_NAMES for all listed agents."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = root / "tamago"

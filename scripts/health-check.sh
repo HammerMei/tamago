@@ -64,11 +64,10 @@ else
   HAS_PROFILE=false
 fi
 
-# ─── Agent name, scope, disable — read directly from tamago.conf ─────────────
+# ─── Agent name and scope — read directly from tamago.conf ───────────────────
 
 AGENT_NAME=""
 AGENT_SCOPE="project"
-AGENT_DISABLED="false"
 if [ -f "$PROJECT_CONF" ]; then
   _agent_out=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
 import sys
@@ -81,13 +80,14 @@ with open(conf_path, 'rb') as f:
     conf = tomllib.load(f)
 agents = conf.get('agents', [])
 if agents:
+    # TODO: multi-agent configs (len(agents) > 1) only check the first agent's scope.
     a = agents[0]
-    print(a.get('name', ''), a.get('scope', 'project'), str(a.get('disable', False)).lower())
+    print(a.get('name', ''), a.get('scope', 'project'))
 # else: print nothing — no agents configured; AGENT_NAME stays empty
 PY
   ) || _agent_out=""
   if [ -n "$_agent_out" ]; then
-    read -r AGENT_NAME AGENT_SCOPE AGENT_DISABLED <<< "$_agent_out"
+    read -r AGENT_NAME AGENT_SCOPE <<< "$_agent_out"
   fi
 fi
 
@@ -107,7 +107,18 @@ JSON_RESULTS=()
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-_json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+_json_escape() {
+  # Escape \, ", then replace control chars (newline/tab/CR) in a portable way.
+  # awk handles multi-line input natively, avoiding GNU-only sed extensions.
+  printf '%s' "$1" \
+    | sed 's/\\/\\\\/g; s/"/\\"/g' \
+    | awk '{
+        gsub(/\t/, "\\t")
+        gsub(/\r/, "\\r")
+        if (NR > 1) printf "\\n"
+        printf "%s", $0
+      }'
+}
 
 _record() {
   local status="$1" name="$2" msg="$3"
@@ -131,6 +142,8 @@ warn() {
   fi
   if [ "$FIX" = true ] && [ -n "$fix" ]; then
     printf "\n   ${BOLD}🔧 Running: %s${NC}\n" "$fix"
+    # NOTE: fix strings must be hardcoded literals — never include user-derived
+    # values (e.g. PROFILE_REPO paths) to avoid eval-based shell injection.
     eval "$fix" && printf "   ${GREEN}✓ done${NC}\n\n" || printf "   ${RED}✗ failed${NC}\n\n"
   fi
 }
@@ -312,50 +325,75 @@ if [ -d "$PROJECT_DIR" ]; then
     warn ".tamago/machine.toml" "missing — re-run: tamago install  (pre-Slice-E install)"
   fi
 
-  # Check skills — location depends on skill source and agent scope:
-  #   tamago built-in skills (tamago/skills/) → ~/.claude/skills/ always (global by default)
-  #   profile skills (profile/skills/)        → follows agent scope:
-  #       global agent  → ~/.claude/skills/
-  #       project agent → project/.claude/skills/
-  #   explicit scope="project" in [[skills]]  → project dir (overrides defaults above)
+  # Check skills — scope is determined by which tamago.conf file the skill is listed in:
+  #   global conf  (~/.tamago/tamago.conf)  → ~/.claude/skills/ (always, install_global_from_conf)
+  #   project conf (.tamago/tamago.conf)    → depends on skill source and agent scope:
+  #       tamago built-in            → ~/.claude/skills/ (built-ins always global)
+  #       profile skill + global agent → ~/.claude/skills/
+  #       profile skill + project agent → <project>/.claude/skills/
   #   when a profile skill shadows a tamago built-in, profile routing rules apply
+  # Only skills listed in [[skills]] (in either conf) are expected — others are silently skipped.
+  # External (URL-sourced) skills are intentionally excluded from health checks; their symlinks
+  # are optional user-managed additions, not required by tamago.
   if [ -d "$REPO/skills" ] || { [ "$HAS_PROFILE" = true ] && [ -d "$PROFILE_REPO/skills" ]; }; then
 
-    # Read project-scoped and disabled skills from tamago.conf
-    PROJECT_SCOPED_SKILLS=()
-    DISABLED_SKILLS=()
-    if [ -f "$PROJECT_CONF" ]; then
-      _pss=$(python3 - "$PROJECT_CONF" <<'PY' 2>/dev/null
-import sys, tomllib
+    # Helper: emit one skill name per line from a tamago.conf, skipping external (URL) skills.
+    _read_skill_names() {
+      python3 - "$1" <<'PY' 2>/dev/null
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 with open(sys.argv[1], 'rb') as f:
     conf = tomllib.load(f)
 for s in conf.get('skills', []):
     src = s.get('source', 'tamago')
-    if s.get('disable', False):
-        print('disabled', s['name'])
-    elif src in ('tamago', 'profile') and s.get('scope', 'global') == 'project':
-        print('project', s['name'])
+    if src in ('tamago', 'profile'):
+        print(s['name'])
 PY
-      ) || _pss=""
+    }
+
+    # Read skills from global conf (~/.tamago/tamago.conf) — these are always globally installed.
+    GLOBAL_CONF="$REPO/tamago.conf"
+    GLOBAL_CONF_SKILLS=()
+    ENABLED_SKILLS=()
+    HAS_SKILLS_IN_CONF=false
+
+    if [ -f "$GLOBAL_CONF" ]; then
+      _gcs=$(_read_skill_names "$GLOBAL_CONF") || _gcs=""
       while IFS= read -r _line; do
-        case "$_line" in
-          "disabled "*) DISABLED_SKILLS+=("${_line#disabled }") ;;
-          "project "*)  PROJECT_SCOPED_SKILLS+=("${_line#project }") ;;
-        esac
+        [ -n "$_line" ] || continue
+        GLOBAL_CONF_SKILLS+=("$_line")
+        ENABLED_SKILLS+=("$_line")
+        HAS_SKILLS_IN_CONF=true
+      done <<< "$_gcs"
+    fi
+
+    # Read skills from project conf (.tamago/tamago.conf) — routing per source + agent scope.
+    if [ -f "$PROJECT_CONF" ]; then
+      _pss=$(_read_skill_names "$PROJECT_CONF") || _pss=""
+      while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        ENABLED_SKILLS+=("$_line")
+        HAS_SKILLS_IN_CONF=true
       done <<< "$_pss"
     fi
 
-    _is_disabled() {
+    # _is_enabled: true if the skill is listed in either conf; false if neither conf has [[skills]]
+    _is_enabled() {
+      [ "$HAS_SKILLS_IN_CONF" = false ] && return 1
       local _name="$1"
-      for _s in "${DISABLED_SKILLS[@]+"${DISABLED_SKILLS[@]}"}"; do
+      for _s in "${ENABLED_SKILLS[@]+"${ENABLED_SKILLS[@]}"}"; do
         [ "$_s" = "$_name" ] && return 0
       done
       return 1
     }
 
-    _is_project_scoped() {
+    # _is_global_conf_skill: true if the skill is listed in the global conf
+    _is_global_conf_skill() {
       local _name="$1"
-      for _s in "${PROJECT_SCOPED_SKILLS[@]+"${PROJECT_SCOPED_SKILLS[@]}"}"; do
+      for _s in "${GLOBAL_CONF_SKILLS[@]+"${GLOBAL_CONF_SKILLS[@]}"}"; do
         [ "$_s" = "$_name" ] && return 0
       done
       return 1
@@ -378,18 +416,18 @@ PY
     }
 
     # _check_skill NAME IS_PROFILE_SKILL
-    #   IS_PROFILE_SKILL=true  → profile routing: global if agent is global, else project
-    #   IS_PROFILE_SKILL=false → tamago built-in: always global
-    # explicit scope="project" override always wins regardless of IS_PROFILE_SKILL
-    # disabled skills (disable=true in tamago.conf) are skipped entirely
+    #   Scope routing (matches setup.py install behavior exactly):
+    #     global conf skill         → always ~/.claude/skills/
+    #     project conf + profile skill + project agent → <project>/.claude/skills/
+    #     project conf + tamago built-in or global agent → ~/.claude/skills/
+    #   Skills not listed in any conf are silently skipped.
     _check_skill() {
       local _name="$1" _is_profile="${2:-false}"
-      if _is_disabled "$_name"; then
-        pass "$_name" "disabled in tamago.conf — skipped"
+      if ! _is_enabled "$_name"; then
         return
       fi
-      if _is_project_scoped "$_name"; then
-        check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
+      if _is_global_conf_skill "$_name"; then
+        check_symlink "$HOME/.claude/skills/$_name" "~/.claude/skills/$_name"
       elif [ "$_is_profile" = "true" ] && [ "$AGENT_SCOPE" != "global" ]; then
         check_symlink "$PROJECT_DIR/.claude/skills/$_name" ".claude/skills/$_name"
       else
@@ -425,9 +463,7 @@ PY
   if [ "$HAS_PROFILE" = false ]; then
     pass "agent symlinks" "no profile configured — skipping"
   elif [ -n "$AGENT_NAME" ]; then
-    if [ "$AGENT_DISABLED" = "true" ]; then
-      pass "agent ($AGENT_NAME)" "disabled in tamago.conf — skipped"
-    elif [ "$AGENT_SCOPE" = "global" ]; then
+    if [ "$AGENT_SCOPE" = "global" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
       check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
       check_generated "$HOME/.opencode/agents/$AGENT_NAME.md"  "~/.opencode/agents/$AGENT_NAME.md"
