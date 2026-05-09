@@ -85,8 +85,9 @@ type: <user | feedback | project | reference>
 After writing a topic file, add a one-line pointer to `MEMORY.md`:
 `- [Title](file.md) — one-line hook (under ~150 chars)`
 
-**Do NOT save to memory**: code patterns, git history, debugging solutions, anything
-already in CLAUDE.md files, or ephemeral task details.
+**Do NOT save to memory**: code patterns, file paths, directory structures, architecture details, design decisions derivable from code, git history, debugging solutions, anything already in CLAUDE.md files, or ephemeral task details. These go stale and actively mislead future sessions — a wrong path in memory is worse than no memory at all.
+
+**Before writing any memory**: actively filter against this list. Ask: "Can this be derived by reading the current codebase or running a command?" If yes, do not save it.
 
 ## Before Acting on a Memory
 
