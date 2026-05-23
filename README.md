@@ -7,6 +7,7 @@
 
   *Skills · Hooks · Memory sync · Setup*
 
+  [![Stars](https://img.shields.io/github/stars/HammerMei/tamago?style=flat&color=yellow)](https://github.com/HammerMei/tamago/stargazers)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
   [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
   [![Claude Code](https://img.shields.io/badge/Claude%20Code-compatible-blueviolet)](https://claude.ai/claude-code)
