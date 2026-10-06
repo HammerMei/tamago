@@ -4250,6 +4250,60 @@ def _skill_result(data: dict, name: str) -> str | None:
     return None
 
 
+class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
+    """health-check warns about tamago leftovers in the legacy ~/.opencode/ dir.
+
+    OpenCode still loads ~/.opencode/ (it walks up from cwd for .opencode/), so
+    leftovers from older tamago installs duplicate ~/.config/opencode/.
+    """
+
+    LEGACY = "~/.opencode (legacy tamago location)"
+
+    def _legacy_result(self, data: dict) -> dict | None:
+        return next((r for r in data.get("results", []) if r["name"] == self.LEGACY), None)
+
+    def _env(self, root: Path) -> tuple[Path, Path, Path]:
+        tamago, home, project = root / "tamago", root / "home", root / "project"
+        for d in (tamago, home, project):
+            d.mkdir()
+        return tamago, home, project
+
+    def test_warns_on_tamago_leftovers_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            legacy = home / ".opencode"
+            (legacy / "agents").mkdir(parents=True)
+            (legacy / "plugins").mkdir()
+            (legacy / ".tamago-manifest.json").write_text("{}")
+            (legacy / "agents" / "gen.md").write_text("<!-- TAMAGO GENERATED -->\n")
+            (legacy / "plugins" / "memory-bootstrap.ts").symlink_to(tamago / "x.ts")
+            (legacy / "agents" / "mine.md").symlink_to(Path(td) / "elsewhere.md")
+            (legacy / "agents" / "hand.md").write_text("my own agent\n")
+
+            r = self._legacy_result(_run_health_check(project, tamago, home))
+
+            self.assertEqual(r["status"], "warn")
+            self.assertTrue(r["msg"].startswith("[WARNING] 3 "), r["msg"])
+            for item in (".tamago-manifest.json", "agents/gen.md", "plugins/memory-bootstrap.ts"):
+                self.assertIn(item, r["msg"])
+            for item in ("mine.md", "hand.md"):
+                self.assertNotIn(item, r["msg"])
+
+    def test_passes_when_no_legacy_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            r = self._legacy_result(_run_health_check(project, tamago, home))
+            self.assertEqual(r["status"], "pass")
+
+    def test_skipped_when_project_is_home(self):
+        """With --project $HOME, ~/.opencode is that project's own dir, not legacy."""
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, _ = self._env(Path(td))
+            (home / ".opencode").mkdir()
+            (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+            self.assertIsNone(self._legacy_result(_run_health_check(home, tamago, home)))
+
+
 class HealthCheckSkillScopeTests(unittest.TestCase):
     """Verify health-check.sh correctly locates skills based on conf file + source + agent scope.
 
