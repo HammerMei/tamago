@@ -1781,23 +1781,22 @@ class PatchSettingsTests(unittest.TestCase):
             self.assertNotIn("additionalDirectories", after.get("permissions", {}))
 
 
-class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
-    """Tests for patch_opencode_global_settings — mirrors Claude Code's patch approach."""
+class TestFileHygieneTests(unittest.TestCase):
+    def test_top_level_class_names_are_unique(self):
+        """A second class with the same name silently replaces the first, and its
+        tests never run (tamago issue #3)."""
+        import ast
+        tree = ast.parse(Path(__file__).read_text())
+        names = [n.name for n in tree.body if isinstance(n, ast.ClassDef)]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual(dupes, [])
 
-    def _run(self, operation, source_root, target, manifest):
-        with (
-            mock.patch.object(
-                sm, "patch_settings",
-                wraps=sm.patch_settings,
-            ),
-            mock.patch.object(
-                sm, "unpatch_settings",
-                wraps=sm.unpatch_settings,
-            ),
-        ):
-            # Override the hardcoded paths inside patch_opencode_global_settings
-            # by patching Path so that ~/.config/opencode/... resolves to our temp dirs.
-            pass  # we call directly with mocked internals below
+
+class PatchSettingsOpencodeTests(unittest.TestCase):
+    """patch_settings / unpatch_settings on an OpenCode config, plus setup_global wiring.
+
+    Mirrors Claude Code's patch approach.
+    """
 
     def test_install_migrates_symlink_to_real_file(self):
         """~/.config/opencode/opencode.json symlink is replaced with a real file on install."""
