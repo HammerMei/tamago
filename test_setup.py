@@ -13,6 +13,15 @@ from pathlib import Path
 from unittest import mock
 
 
+# Home isolation — some tests only patch Path.home(), but Path.expanduser() reads
+# $HOME, so "~/..." paths in setup.py reached the developer's real home (e.g. the
+# live ~/.config/opencode/opencode.json). Point HOME at a throwaway dir for the
+# whole run, before setup.py is imported (it expands "~" at import time too).
+# Tests that need a specific home still patch HOME / expanduser themselves.
+_TEST_HOME = tempfile.mkdtemp(prefix="tamago_test_home_")
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+os.environ["HOME"] = _TEST_HOME
+
 MODULE_PATH = Path(__file__).with_name("setup.py")
 SPEC = importlib.util.spec_from_file_location("assistant_setup", MODULE_PATH)
 sm = importlib.util.module_from_spec(SPEC)
