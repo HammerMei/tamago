@@ -92,6 +92,13 @@ PY
     read -r AGENT_NAME AGENT_SCOPE AGENT_SOURCE <<< "$_agent_out"
   fi
 fi
+# With --project $HOME, PROJECT_CONF is ~/.tamago/tamago.conf — the global conf.
+# setup.py installs everything declared there globally and ignores `scope`, so
+# check those agents at global paths (~/.claude, ~/.config/opencode), not as a
+# project rooted at $HOME (which would look in ~/.opencode).
+if [ "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$HOME" && pwd -P)" ]; then
+  AGENT_SCOPE="global"
+fi
 
 # ─── Colors (only when printing to terminal, not in JSON mode) ────────────────
 
