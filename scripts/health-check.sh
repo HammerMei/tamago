@@ -173,6 +173,14 @@ fail() {
 
 section() { [ "$JSON" = false ] && printf "\n${BOLD}── %s${NC}\n" "$1"; }
 
+# Home memory links for a persona agent: the dotted name and, when it differs, the
+# dashed name Claude Code 2.1.121+ looks up (setup.py creates both).
+check_home_memory_links() {
+  check_symlink "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
+  local dashed="${AGENT_NAME//./-}"
+  [ "$dashed" = "$AGENT_NAME" ] || check_symlink "$HOME/.claude/agent-memory/$dashed" "~/.claude/agent-memory/$dashed"
+}
+
 check_symlink() {
   local link="$1" name="$2"
   if [ -L "$link" ]; then
@@ -519,7 +527,7 @@ PY
     # Persona agent (source=profile): files are generated; has memory dir symlink.
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
-      check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
+      check_home_memory_links
       check_generated "$OPENCODE_GLOBAL_DIR/agents/$AGENT_NAME.md"  "~/.config/opencode/agents/$AGENT_NAME.md"
       # Profile settings (e.g. agent-emojis.json) — also installed globally for global agents
       if [ -d "$PROFILE_REPO/settings/claude" ]; then
@@ -534,7 +542,7 @@ PY
       check_generated "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"    ".claude/agents/$AGENT_NAME.md"
       # memory: user for every persona agent — Claude Code loads it from the home link;
       # the project link is what the OpenCode memory-bootstrap plugin reads.
-      check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
+      check_home_memory_links
       check_symlink   "$PROJECT_DIR/.claude/agent-memory/$AGENT_NAME" ".claude/agent-memory/$AGENT_NAME"
       check_generated "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md"  ".opencode/agents/$AGENT_NAME.md"
     fi

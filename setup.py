@@ -181,20 +181,29 @@ def _symlink_mem_dir(source: Path, target_root: Path) -> None:
 
 
 def _check_home_mem_links(sources: "list[Path]", home_root: Path) -> None:
-    """Raise if a ~/.claude/agent-memory/ link already points to another, existing
-    directory: that root is shared by every project on the machine, so another
-    profile uses the same agent name.  Run before install writes anything, so a
-    conflict leaves no half-finished install.  Dangling links (e.g. the profile
-    moved) are allowed; _symlink_mem_dir re-points them.
+    """Raise if ~/.claude/agent-memory/<name> is occupied by something other than
+    this profile's memory: a link to another existing directory (another profile
+    uses the same agent name; the root is shared by every project on the machine),
+    or a real file or non-empty directory, which _symlink_mem_dir would skip while
+    the agent's memory: user still loaded it.  Run before any agent file or memory
+    link is written.  Dangling links (e.g. the profile moved) and empty directories
+    are allowed; _symlink_mem_dir replaces them.
     """
     for source in sources:
         for link_name in _agent_memory_link_names(source.name):
             link = home_root / link_name
-            if link.is_symlink() and link.resolve().exists() and link.resolve() != source.resolve():
+            if link.is_symlink():
+                if link.resolve().exists() and link.resolve() != source.resolve():
+                    raise Exception(
+                        f"[ERROR] {link} already links to {link.resolve()}, not {source}.\n"
+                        f"        Agent names must be unique per machine. If another install uses that\n"
+                        f"        memory, uninstall it or rename one agent. Uninstall keeps this link, so if\n"
+                        f"        nothing uses it any more, remove it (rm {link}) and re-run install."
+                    )
+            elif link.exists() and not (link.is_dir() and not any(link.iterdir())):
                 raise Exception(
-                    f"[ERROR] {link} already links to {link.resolve()}, not {source}.\n"
-                    f"        Agent names must be unique per machine. Uninstall the other agent,\n"
-                    f"        or remove the link if it is stale, then re-run install."
+                    f"[ERROR] {link} is a real file or non-empty directory, not a tamago link.\n"
+                    f"        Move anything you want to keep into {source}, remove it, and re-run install."
                 )
 
 

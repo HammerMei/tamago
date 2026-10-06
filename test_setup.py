@@ -4816,6 +4816,26 @@ printf '%s' "{{\"msg\":\"$escaped\"}}"
                 ".claude/agent-memory/test-agent": "pass",
             })
 
+    def test_dashed_home_memory_link_is_checked(self):
+        """The dashed home memory link (what Claude Code 2.1.121+ loads) is checked too."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=[], agent_scope="project",
+                agent_name="test.agent",
+            )
+            conf = project / ".tamago" / "tamago.conf"
+            conf.write_text(conf.read_text().replace('scope = "project"', 'source = "profile"'))
+            mem_source = profile / "agents" / "memory" / "test.agent"
+            (project / ".claude" / "agent-memory" / "test.agent").symlink_to(mem_source)
+            (home / ".claude" / "agent-memory").mkdir(parents=True)
+            (home / ".claude" / "agent-memory" / "test.agent").symlink_to(mem_source)
+
+            data = _run_health_check(project, tamago, home, profile)
+            rows = {r["name"]: r["status"] for r in data["results"] if "agent-memory" in r["name"]}
+            self.assertEqual(rows.get("~/.claude/agent-memory/test-agent"), "fail")
+            self.assertEqual(rows.get("~/.claude/agent-memory/test.agent"), "pass")
+
 
 class SkillScopeRoutingTests(unittest.TestCase):
     """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
@@ -6498,12 +6518,57 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
 
             self.assertIn("[ERROR]", str(ctx.exception))
             self.assertIn("unique per machine", str(ctx.exception))
+            # Uninstall keeps home links, so the error must say how to release the name
+            self.assertIn(f"rm {home_root / 'hammer.mei'}", str(ctx.exception))
             # The other profile's link is untouched
             self.assertEqual((home_root / "hammer.mei").resolve(), other.resolve())
             # Checked before anything is written: no half-finished install
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
             self.assertFalse((project / ".claude" / "agent-memory").exists())
             self.assertFalse((home_root / "hammer-mei").exists())
+
+    def test_home_memory_real_dir_fails_install(self):
+        """A non-empty real directory at the home memory path (e.g. memory Claude Code
+        wrote before tamago linked it) would be loaded via memory: user while the link
+        is skipped: install must refuse it before writing anything."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            occupied = root / "home" / ".claude" / "agent-memory" / "hammer-mei"
+            occupied.mkdir(parents=True)
+            (occupied / "MEMORY.md").write_text("unmanaged\n")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception) as ctx:
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertIn("not a tamago link", str(ctx.exception))
+            self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
+            self.assertEqual((occupied / "MEMORY.md").read_text(), "unmanaged\n")
+
+    def test_home_memory_empty_dir_is_replaced(self):
+        """An empty directory at the home memory path (auto-created by Claude Code
+        2.1.121+) is not a conflict: it is replaced with the link."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            empty = root / "home" / ".claude" / "agent-memory" / "hammer-mei"
+            empty.mkdir(parents=True)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile, install_globally=False,
+                )
+
+            self.assertTrue(empty.is_symlink())
 
     def test_home_memory_dashed_link_to_other_profile_fails_before_repointing(self):
         """Dotted link dangling, dashed link owned by another profile: install must fail
