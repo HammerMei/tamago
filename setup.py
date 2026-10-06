@@ -187,10 +187,18 @@ def _check_home_mem_links(sources: "list[Path]", home_root: Path) -> None:
     or a real file or non-empty directory, which _symlink_mem_dir would skip while
     the agent's memory: user still loaded it.  Run before any agent file or memory
     link is written.  Dangling links (e.g. the profile moved) and empty directories
-    are allowed; _symlink_mem_dir replaces them.
+    are allowed; _symlink_mem_dir replaces them.  Also raise if two agents being
+    installed map to the same link name (e.g. ``foo.bar`` and ``foo-bar``).
     """
+    claimed: dict[str, Path] = {}
     for source in sources:
         for link_name in _agent_memory_link_names(source.name):
+            if link_name in claimed and claimed[link_name] != source:
+                raise Exception(
+                    f"[ERROR] agents '{claimed[link_name].name}' and '{source.name}' both use the memory\n"
+                    f"        link name '{link_name}' (Claude Code replaces dots with dashes). Rename one."
+                )
+            claimed[link_name] = source
             link = home_root / link_name
             if link.is_symlink():
                 if link.resolve().exists() and link.resolve() != source.resolve():

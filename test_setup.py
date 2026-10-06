@@ -6551,6 +6551,26 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
             self.assertEqual((occupied / "MEMORY.md").read_text(), "unmanaged\n")
 
+    def test_agents_sharing_a_normalized_memory_name_fail_install(self):
+        """foo.bar and foo-bar both map to the foo-bar link: refuse before writing,
+        instead of letting the last one silently own it."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "foo.bar")
+            (profile / "agents" / "memory" / "foo-bar").mkdir(parents=True)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception) as ctx:
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertIn("both use the memory", str(ctx.exception))
+            self.assertFalse((root / "home" / ".claude" / "agent-memory").exists())
+
     def test_home_memory_empty_dir_is_replaced(self):
         """An empty directory at the home memory path (auto-created by Claude Code
         2.1.121+) is not a conflict: it is replaced with the link."""
