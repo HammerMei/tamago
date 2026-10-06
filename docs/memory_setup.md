@@ -15,10 +15,13 @@ Two layers:
 | **Env-specific** | `agents/memory/hammer.mei/env-{hostname}/` | Per-machine private |
 
 > ⚠️ **All memory files must live inside the `assistant` repo** (`$ASSISTANT_SETUP_REPO`).
-> Never write to `~/.claude/` — that path is outside git and won't sync.
+> Never create files directly under `~/.claude/` — that path is outside git and won't sync.
+> Writing through the `~/.claude/agent-memory/hammer.mei/` symlink below is fine: it lands in the repo.
 
-The `.claude/agent-memory/hammer.mei/` path is a **symlink** (created by `setup.py`) pointing
-to the real directory above. Claude Code reads through it; git tracks the real path.
+`~/.claude/agent-memory/hammer.mei/` is a **symlink** (created by `setup.py`) pointing
+to the real directory above. Claude Code reads through it (agents use `memory: user`); git
+tracks the real path. Project installs also create `.claude/agent-memory/hammer.mei/` in the
+project, which the OpenCode memory plugin reads.
 
 ---
 

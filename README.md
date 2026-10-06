@@ -155,6 +155,7 @@ memory_sync = true   # default: true
 | Profile skills | Project conf → project `.claude/skills/`; global conf → `~/.claude/skills/` |
 | Agents declared in project conf | `<project>/.claude/agents/` |
 | Agents declared in global conf | `~/.claude/agents/` |
+| Persona agent memory | Always `~/.claude/agent-memory/<name>` (`memory: user`); project installs also link `<project>/.claude/agent-memory/<name>` |
 | Plugins | Run their own `install.py` with matching scope |
 
 The `scope` field is no longer used — the tier determines the scope.
@@ -253,7 +254,7 @@ description: >
   What this agent does, in one line.
 skills:
   - text-to-speech
-memory: project
+memory: user          # install always sets this to user
 maxTurns: 12
 ---
 

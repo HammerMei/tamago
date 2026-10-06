@@ -180,6 +180,41 @@ def _symlink_mem_dir(source: Path, target_root: Path) -> None:
         print(f"linked  {target} -> {source}")
 
 
+def _check_home_mem_links(sources: "list[Path]", home_root: Path) -> None:
+    """Raise if ~/.claude/agent-memory/<name> is occupied by something other than
+    this profile's memory: a link to another existing directory (another profile
+    uses the same agent name; the root is shared by every project on the machine),
+    or a real file or non-empty directory, which _symlink_mem_dir would skip while
+    the agent's memory: user still loaded it.  Run before any agent file or memory
+    link is written.  Dangling links (e.g. the profile moved) and empty directories
+    are allowed; _symlink_mem_dir replaces them.  Also raise if two agents being
+    installed map to the same link name (e.g. ``foo.bar`` and ``foo-bar``).
+    """
+    claimed: dict[str, Path] = {}
+    for source in sources:
+        for link_name in _agent_memory_link_names(source.name):
+            if link_name in claimed and claimed[link_name] != source:
+                raise Exception(
+                    f"[ERROR] agents '{claimed[link_name].name}' and '{source.name}' both use the memory\n"
+                    f"        link name '{link_name}' (Claude Code replaces dots with dashes). Rename one."
+                )
+            claimed[link_name] = source
+            link = home_root / link_name
+            if link.is_symlink():
+                if link.resolve().exists() and link.resolve() != source.resolve():
+                    raise Exception(
+                        f"[ERROR] {link} already links to {link.resolve()}, not {source}.\n"
+                        f"        Agent names must be unique per machine. If another install uses that\n"
+                        f"        memory, uninstall it or rename one agent. Uninstall keeps this link, so if\n"
+                        f"        nothing uses it any more, remove it (rm {link}) and re-run install."
+                    )
+            elif link.exists() and not (link.is_dir() and not any(link.iterdir())):
+                raise Exception(
+                    f"[ERROR] {link} is a real file or non-empty directory, not a tamago link.\n"
+                    f"        Move anything you want to keep into {source}, remove it, and re-run install."
+                )
+
+
 def _unlink_mem_dir(source: Path, target_root: Path) -> None:
     """Remove all memory-dir symlinks (both canonical and normalized forms)."""
     for link_name in _agent_memory_link_names(source.name):
@@ -1216,14 +1251,13 @@ def _merge_agent(
     persona_file: Path,
     target_dir: Path,
     tts_enabled: bool = True,
-    scope: str = "project",
 ) -> None:
     """Merge tamago-agent-base.md + persona file → target_dir/<agent_name>.md.
 
-    scope controls the Claude Code ``memory:`` frontmatter field and the memory
-    path references emitted in the agent body:
-      "project"  → memory: project, .claude/agent-memory/ (project-relative)
-      "user"     → memory: user,    ~/.claude/agent-memory/ (home-relative)
+    Memory is always user scope (``memory: user``, ``~/.claude/agent-memory/``),
+    whether the agent itself is installed globally or per project: Claude Code
+    does not auto-load project-scope memory through a symlink that resolves
+    outside the project, and tamago's memory dirs are always such symlinks.
     """
     # agent_name: strip the ".persona" suffix  (hammer.mei.persona.md → hammer.mei)
     agent_name = persona_file.stem  # e.g. "hammer.mei.persona"
@@ -1239,31 +1273,16 @@ def _merge_agent(
 
     agent_memory_dir = agent_name.replace(".", "-")  # normalized per CC convention
 
-    # Scope-dependent memory values used to expand template variables.
-    if scope == "user":
-        _mem_root = "~/.claude/agent-memory/"
-        _mem_location_desc = "a user-scope directory at `~/.claude/agent-memory/`"
-        _mem_path_warning = (
-            f"> ⚠️ **Always use the path** `~/.claude/agent-memory/{agent_memory_dir}/`"
-            " for all Read/Write\n"
-            "> tool calls. Claude Code does not require permission approval to access"
-            " this directory.\n"
-            "> Never write directly to the absolute profile source path."
-        )
-        _mem_frontmatter_value = "user"
-    else:  # "project"
-        _mem_root = ".claude/agent-memory/"
-        _mem_location_desc = "project-scope symlinks under `.claude/agent-memory/`"
-        _mem_path_warning = (
-            f"> ⚠️ **Always use the symlink path** `.claude/agent-memory/{agent_memory_dir}/`"
-            " for all Read/Write\n"
-            "> tool calls — it lives inside the project directory and never requires"
-            " permission approval.\n"
-            "> Never write to `~/.claude/` or any absolute profile path — those are"
-            " outside the project\n"
-            "> scope and will trigger approval prompts."
-        )
-        _mem_frontmatter_value = "project"
+    _mem_root = "~/.claude/agent-memory/"
+    _mem_location_desc = "a user-scope directory at `~/.claude/agent-memory/`"
+    _mem_path_warning = (
+        f"> ⚠️ **Always use the path** `~/.claude/agent-memory/{agent_memory_dir}/`"
+        " for all Read/Write\n"
+        "> tool calls. Claude Code does not require permission approval to access"
+        " this directory.\n"
+        "> Never write directly to the absolute profile source path."
+    )
+    _mem_frontmatter_value = "user"
 
     def _sub(text: str) -> str:
         return (
@@ -1287,8 +1306,8 @@ def _merge_agent(
             frontmatter = "---" + parts[1] + "---\n"
             body = parts[2].lstrip("\n")
 
-    # Override memory scope in frontmatter to match install scope so Claude Code
-    # injects the correct memory path for this deployment.
+    # Force memory: user in frontmatter regardless of what the persona file says
+    # (see docstring).
     if frontmatter:
         frontmatter = re.sub(
             r"^(memory:\s*)\S+",
@@ -1355,8 +1374,9 @@ def setup_agents(
                        None means "install all" (only meaningful for direct callers bypassing
                        conf; conf-driven paths always pass a set).  Empty set installs nothing.
     install_globally:  when True, install to ~/.claude/agents/ (and ~/.config/opencode/agents/)
-                       instead of the project-level agents dir.  Memory dirs follow the
-                       same routing.  Use for the global-conf path (tamago install-global).
+                       instead of the project-level agents dir.  Memory dirs are always
+                       linked in ~/.claude/agent-memory/; project installs also link them in
+                       the project.  Use for the global-conf path (tamago install-global).
     On UNINSTALL: only agents in enabled_agents are removed (same whitelist as INSTALL).
                   If an agent was removed from the conf before uninstall, its files remain
                   as orphans — acceptable; re-install first or clean manually.
@@ -1392,7 +1412,21 @@ def setup_agents(
         if enabled_agents is None or f.stem in enabled_agents
     ]
 
+    home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
+    if profile_root and (profile_root / "agents" / "memory").is_dir():
+        mem_source = profile_root / "agents" / "memory"
+    elif (source_root / "agents" / "memory").is_dir():
+        mem_source = source_root / "agents" / "memory"
+    else:
+        mem_source = None
+    enabled_mem_dirs = [
+        d for d in (sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith(".")) if mem_source else [])
+        if enabled_agents is None or d.name in enabled_agents
+    ]
+
     if operation == Operation.INSTALL:
+        _check_home_mem_links(enabled_mem_dirs, home_agent_mem_root)
+
         if install_globally:
             # Remove project-level files for all agents (scope flip: project → global)
             for f in enabled_tamago_agents:
@@ -1433,7 +1467,6 @@ def setup_agents(
                 symlink_paths([f], claude_agents_dir)
                 symlink_paths([f], opencode_agents_dir)
 
-            agent_scope = "user" if install_globally else "project"
             for persona_file in sorted((profile_root / "agents").iterdir()):
                 if persona_file.is_file() and persona_file.name.endswith(".persona.md"):
                     agent_name = persona_file.stem
@@ -1441,37 +1474,21 @@ def setup_agents(
                         agent_name = agent_name[: -len(".persona")]
                     if enabled_agents is not None and agent_name not in enabled_agents:
                         continue
-                    _merge_agent(source_root, profile_root, persona_file, claude_agents_dir, tts_enabled, scope=agent_scope)
-                    _merge_agent(source_root, profile_root, persona_file, opencode_agents_dir, tts_enabled, scope=agent_scope)
+                    _merge_agent(source_root, profile_root, persona_file, claude_agents_dir, tts_enabled)
+                    _merge_agent(source_root, profile_root, persona_file, opencode_agents_dir, tts_enabled)
 
-        # 3. Memory dirs — follow agent scope (same as agent file)
-        #    Global agents: ~/.claude/agent-memory/  (accessible from any project)
-        #    Project agents: {project}/.claude/agent-memory/
-        home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
-
-        if profile_root and (profile_root / "agents" / "memory").is_dir():
-            mem_source = profile_root / "agents" / "memory"
-        elif (source_root / "agents" / "memory").is_dir():
-            mem_source = source_root / "agents" / "memory"
-        else:
-            mem_source = None
-
-        if mem_source:
-            agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
-            enabled_mem_dirs = [
-                d for d in agent_mem_dirs
-                if enabled_agents is None or d.name in enabled_agents
-            ]
-
-            if install_globally:
-                # Remove project-level memory symlinks (scope flip: project → global)
-                for d in enabled_mem_dirs:
-                    _unlink_mem_dir(d, target_claude_agent_mem_root)
-                for d in enabled_mem_dirs:
-                    _symlink_mem_dir(d, home_agent_mem_root)
-            else:
-                for d in enabled_mem_dirs:
-                    _symlink_mem_dir(d, target_claude_agent_mem_root)
+        # 3. Memory dirs — always linked in ~/.claude/agent-memory/ (memory: user,
+        #    see _merge_agent).  Project agents also keep {project}/.claude/agent-memory/
+        #    links, which the OpenCode memory-bootstrap plugin reads.
+        if install_globally:
+            # Remove project-level memory symlinks (scope flip: project → global)
+            for d in enabled_mem_dirs:
+                _unlink_mem_dir(d, target_claude_agent_mem_root)
+        for d in enabled_mem_dirs:
+            _symlink_mem_dir(d, home_agent_mem_root)
+        if not install_globally:
+            for d in enabled_mem_dirs:
+                _symlink_mem_dir(d, target_claude_agent_mem_root)
 
     elif operation == Operation.UNINSTALL:
         # Determine which dirs to clean up based on current install_globally flag.
@@ -1519,22 +1536,22 @@ def setup_agents(
                 for d in uninstall_dirs:
                     _remove_agent_files_if_managed(name, [d])
 
-        # Remove memory symlinks — scope-aware (mirrors INSTALL routing).
-        # Both canonical (hammer.mei) and normalized (hammer-mei) forms are removed.
+        # Remove project memory symlinks (both hammer.mei and hammer-mei forms).
+        # ~/.claude/agent-memory/ links are left in place on every uninstall: they
+        # are machine-wide, and a project or global install of the same agent may
+        # still rely on them.  A leftover link to a deleted profile is harmless.
         mem_source = (
             (profile_root / "agents" / "memory") if profile_root
             else (source_root / "agents" / "memory")
         )
-        home_agent_mem_root = Path("~/.claude/agent-memory").expanduser()
-        if mem_source.is_dir():
+        if mem_source.is_dir() and not install_globally:
             agent_mem_dirs = sub_paths(mem_source, lambda p: p.is_dir() and not p.name.startswith("."))
             enabled_mem_dirs = [
                 d for d in agent_mem_dirs
                 if enabled_agents is None or d.name in enabled_agents
             ]
-            mem_root = home_agent_mem_root if install_globally else target_claude_agent_mem_root
             for d in enabled_mem_dirs:
-                _unlink_mem_dir(d, mem_root)
+                _unlink_mem_dir(d, target_claude_agent_mem_root)
 
 
 # ---------------------------------------------------------------------------

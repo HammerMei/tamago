@@ -4786,6 +4786,56 @@ printf '%s' "{{\"msg\":\"$escaped\"}}"
                 "~/.config/opencode/agents/code-reviewer.md": "pass",
             })
 
+    def test_project_persona_agent_requires_home_memory_link(self):
+        """A project-scoped persona agent uses memory: user, so health-check must flag a
+        missing ~/.claude/agent-memory/<name> link even when the project link exists."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=[], agent_scope="project"
+            )
+            conf = project / ".tamago" / "tamago.conf"
+            conf.write_text(conf.read_text().replace('scope = "project"', 'source = "profile"'))
+            mem_source = profile / "agents" / "memory" / "test-agent"
+            (project / ".claude" / "agent-memory" / "test-agent").symlink_to(mem_source)
+
+            def mem_rows():
+                data = _run_health_check(project, tamago, home, profile)
+                return {r["name"]: r["status"] for r in data["results"]
+                        if "agent-memory" in r["name"]}
+
+            self.assertEqual(mem_rows(), {
+                "~/.claude/agent-memory/test-agent": "fail",
+                ".claude/agent-memory/test-agent": "pass",
+            })
+
+            (home / ".claude" / "agent-memory").mkdir(parents=True)
+            (home / ".claude" / "agent-memory" / "test-agent").symlink_to(mem_source)
+            self.assertEqual(mem_rows(), {
+                "~/.claude/agent-memory/test-agent": "pass",
+                ".claude/agent-memory/test-agent": "pass",
+            })
+
+    def test_dashed_home_memory_link_is_checked(self):
+        """The dashed home memory link (what Claude Code 2.1.121+ loads) is checked too."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_env(
+                root, tamago_skills=[], profile_skills=[], agent_scope="project",
+                agent_name="test.agent",
+            )
+            conf = project / ".tamago" / "tamago.conf"
+            conf.write_text(conf.read_text().replace('scope = "project"', 'source = "profile"'))
+            mem_source = profile / "agents" / "memory" / "test.agent"
+            (project / ".claude" / "agent-memory" / "test.agent").symlink_to(mem_source)
+            (home / ".claude" / "agent-memory").mkdir(parents=True)
+            (home / ".claude" / "agent-memory" / "test.agent").symlink_to(mem_source)
+
+            data = _run_health_check(project, tamago, home, profile)
+            rows = {r["name"]: r["status"] for r in data["results"] if "agent-memory" in r["name"]}
+            self.assertEqual(rows.get("~/.claude/agent-memory/test-agent"), "fail")
+            self.assertEqual(rows.get("~/.claude/agent-memory/test.agent"), "pass")
+
 
 class SkillScopeRoutingTests(unittest.TestCase):
     """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
@@ -6270,7 +6320,9 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
         mem_dir.mkdir(parents=True)
         return profile
 
-    def test_project_agent_memory_goes_to_project_dir(self):
+    def test_project_agent_memory_links_in_project_and_home(self):
+        """Project agents use memory: user, so the home link is required; the project
+        link stays for the OpenCode memory-bootstrap plugin."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_minimal_source(root)
@@ -6294,8 +6346,13 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                 (mem_root / "hammer.mei").resolve(),
                 (mem_root / "hammer-mei").resolve(),
             )
-            home_mem = root / "home" / ".claude" / "agent-memory" / "hammer.mei"
-            self.assertFalse(home_mem.exists())
+            home_root = root / "home" / ".claude" / "agent-memory"
+            self.assertTrue((home_root / "hammer.mei").is_symlink())
+            self.assertTrue((home_root / "hammer-mei").is_symlink())
+            self.assertEqual(
+                (home_root / "hammer.mei").resolve(),
+                (mem_root / "hammer.mei").resolve(),
+            )
 
     def test_global_agent_memory_goes_to_home_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -6379,8 +6436,14 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             self.assertFalse((mem_root / "hammer-mei").exists())
             agent_md = project / ".claude" / "agents" / "hammer.mei.md"
             self.assertFalse(agent_md.exists())
+            # Home links are machine-wide (another project may use them): left in place
+            home_root = root / "home" / ".claude" / "agent-memory"
+            self.assertTrue((home_root / "hammer.mei").is_symlink())
+            self.assertTrue((home_root / "hammer-mei").is_symlink())
 
-    def test_uninstall_removes_global_agent_and_memory(self):
+    def test_uninstall_global_agent_keeps_home_memory_links(self):
+        """Global uninstall removes the agent but leaves ~/.claude/agent-memory/ links:
+        a project install of the same agent may rely on them (memory: user)."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_minimal_source(root)
@@ -6400,9 +6463,10 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
                     sm.Operation.UNINSTALL, source, project,
                     profile_root=profile, install_globally=True,
                 )
+                self.assertFalse((root / "home" / ".claude" / "agents" / "hammer.mei.md").exists())
 
-            self.assertFalse((home_root / "hammer.mei").exists())
-            self.assertFalse((home_root / "hammer-mei").exists())
+            self.assertTrue((home_root / "hammer.mei").is_symlink())
+            self.assertTrue((home_root / "hammer-mei").is_symlink())
 
 
     def test_memory_symlink_replaces_empty_dir_created_by_claude_code(self):
@@ -6431,16 +6495,160 @@ class SetupAgentsMemoryAndUninstallTests(unittest.TestCase):
             self.assertTrue(empty_dir.is_symlink())
 
 
+    def test_home_memory_link_to_other_profile_fails_install(self):
+        """Same agent name from another profile already linked in ~/.claude/agent-memory/:
+        install must fail loudly instead of re-pointing the shared link."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            other = root / "other-profile" / "agents" / "memory" / "hammer.mei"
+            other.mkdir(parents=True)
+            home_root = root / "home" / ".claude" / "agent-memory"
+            home_root.mkdir(parents=True)
+            (home_root / "hammer.mei").symlink_to(other)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception) as ctx:
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertIn("[ERROR]", str(ctx.exception))
+            self.assertIn("unique per machine", str(ctx.exception))
+            # Uninstall keeps home links, so the error must say how to release the name
+            self.assertIn(f"rm {home_root / 'hammer.mei'}", str(ctx.exception))
+            # The other profile's link is untouched
+            self.assertEqual((home_root / "hammer.mei").resolve(), other.resolve())
+            # Checked before anything is written: no half-finished install
+            self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
+            self.assertFalse((project / ".claude" / "agent-memory").exists())
+            self.assertFalse((home_root / "hammer-mei").exists())
+
+    def test_home_memory_real_dir_fails_install(self):
+        """A non-empty real directory at the home memory path (e.g. memory Claude Code
+        wrote before tamago linked it) would be loaded via memory: user while the link
+        is skipped: install must refuse it before writing anything."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            occupied = root / "home" / ".claude" / "agent-memory" / "hammer-mei"
+            occupied.mkdir(parents=True)
+            (occupied / "MEMORY.md").write_text("unmanaged\n")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception) as ctx:
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertIn("not a tamago link", str(ctx.exception))
+            self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
+            self.assertEqual((occupied / "MEMORY.md").read_text(), "unmanaged\n")
+
+    def test_agents_sharing_a_normalized_memory_name_fail_install(self):
+        """foo.bar and foo-bar both map to the foo-bar link: refuse before writing,
+        instead of letting the last one silently own it."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "foo.bar")
+            (profile / "agents" / "memory" / "foo-bar").mkdir(parents=True)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception) as ctx:
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertIn("both use the memory", str(ctx.exception))
+            self.assertFalse((root / "home" / ".claude" / "agent-memory").exists())
+
+    def test_home_memory_empty_dir_is_replaced(self):
+        """An empty directory at the home memory path (auto-created by Claude Code
+        2.1.121+) is not a conflict: it is replaced with the link."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            empty = root / "home" / ".claude" / "agent-memory" / "hammer-mei"
+            empty.mkdir(parents=True)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile, install_globally=False,
+                )
+
+            self.assertTrue(empty.is_symlink())
+
+    def test_home_memory_dashed_link_to_other_profile_fails_before_repointing(self):
+        """Dotted link dangling, dashed link owned by another profile: install must fail
+        without re-pointing the dotted one (the pair must never split across profiles)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            other = root / "other-profile" / "agents" / "memory" / "hammer.mei"
+            other.mkdir(parents=True)
+            gone = root / "gone" / "hammer.mei"
+            home_root = root / "home" / ".claude" / "agent-memory"
+            home_root.mkdir(parents=True)
+            (home_root / "hammer.mei").symlink_to(gone)
+            (home_root / "hammer-mei").symlink_to(other)
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                with self.assertRaises(Exception):
+                    sm.setup_agents(
+                        sm.Operation.INSTALL, source, project,
+                        profile_root=profile, install_globally=False,
+                    )
+
+            self.assertEqual(os.readlink(home_root / "hammer.mei"), str(gone))
+            self.assertEqual((home_root / "hammer-mei").resolve(), other.resolve())
+
+    def test_home_memory_dangling_link_is_replaced(self):
+        """A dangling home link (e.g. the profile repo moved) is re-pointed, not refused."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = self._make_minimal_source(root)
+            profile = self._make_profile_with_memory(root, "hammer.mei")
+            home_root = root / "home" / ".claude" / "agent-memory"
+            home_root.mkdir(parents=True)
+            (home_root / "hammer.mei").symlink_to(root / "gone" / "hammer.mei")
+            project = root / "project"
+
+            with mock.patch.object(Path, "expanduser", self._fake_expanduser(root)):
+                sm.setup_agents(
+                    sm.Operation.INSTALL, source, project,
+                    profile_root=profile, install_globally=False,
+                )
+
+            self.assertEqual(
+                (home_root / "hammer.mei").resolve(),
+                (profile / "agents" / "memory" / "hammer.mei").resolve(),
+            )
+
+
 # ---------------------------------------------------------------------------
 # _merge_agent scope tests
 # ---------------------------------------------------------------------------
 
 class MergeAgentScopeTests(unittest.TestCase):
-    """Tests that _merge_agent and setup_agents correctly set memory scope.
+    """Tests that generated agent files always use user-scope memory.
 
-    The 'scope' parameter controls two things in the generated agent .md:
-      1. The ``memory:`` frontmatter field (project vs user).
-      2. The memory path references and warning text in the agent body.
+    Regardless of install scope, the generated agent .md has:
+      1. ``memory: user`` in the frontmatter (overriding the persona file).
+      2. ~/.claude/agent-memory/ path references in the body.
     """
 
     def _fake_expanduser(self, root: Path):
@@ -6477,8 +6685,9 @@ class MergeAgentScopeTests(unittest.TestCase):
         )
         return profile
 
-    def test_project_scope_sets_memory_project_in_frontmatter(self):
-        """Project-scope install generates agent.md with memory: project."""
+    def test_project_scope_sets_memory_user_in_frontmatter(self):
+        """Project-scope install also generates memory: user (project-scope memory
+        through an out-of-project symlink is not auto-loaded by Claude Code)."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root)
@@ -6492,8 +6701,8 @@ class MergeAgentScopeTests(unittest.TestCase):
             )
 
             content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
-            self.assertIn("memory: project", content)
-            self.assertNotIn("memory: user", content)
+            self.assertIn("memory: user", content)
+            self.assertNotIn("memory: project", content)
 
     def test_global_scope_sets_memory_user_in_frontmatter(self):
         """Global-scope install generates agent.md with memory: user (not project)."""
@@ -6515,8 +6724,8 @@ class MergeAgentScopeTests(unittest.TestCase):
             self.assertIn("memory: user", content)
             self.assertNotIn("memory: project", content)
 
-    def test_project_scope_body_uses_project_paths_and_warning(self):
-        """Project-scope body references .claude/agent-memory/ and warns about ~/.claude/."""
+    def test_project_scope_body_uses_home_paths(self):
+        """Project-scope body references ~/.claude/agent-memory/, like a global install."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root)
@@ -6530,14 +6739,9 @@ class MergeAgentScopeTests(unittest.TestCase):
             )
 
             content = (project / ".claude" / "agents" / "hammer.mei.md").read_text()
-            # Body must use project-relative path
-            self.assertIn(".claude/agent-memory/hammer-mei/", content)
-            # Body must NOT reference home path
-            self.assertNotIn("~/.claude/agent-memory/", content)
-            # Warning about ~/.claude/ must be present for project scope
-            self.assertIn("Never write to `~/.claude/`", content)
-            # Scope description must be project-flavoured
-            self.assertIn("project-scope symlinks", content)
+            self.assertIn("~/.claude/agent-memory/hammer-mei/", content)
+            self.assertNotIn("Never write to `~/.claude/`", content)
+            self.assertIn("user-scope directory", content)
 
     def test_global_scope_body_uses_home_paths_no_project_warning(self):
         """Global-scope body references ~/.claude/agent-memory/ and omits project warning."""
@@ -6581,7 +6785,7 @@ class MergeAgentScopeTests(unittest.TestCase):
                 proj_content = (
                     project / ".claude" / "agents" / "hammer.mei.md"
                 ).read_text()
-                self.assertIn("memory: project", proj_content)
+                self.assertIn("memory: user", proj_content)
 
                 # Reinstall as global-scope
                 sm.setup_agents(
@@ -6594,8 +6798,8 @@ class MergeAgentScopeTests(unittest.TestCase):
 
             self.assertIn("memory: user", global_content)
 
-    def test_reinstall_global_to_project_updates_scope(self):
-        """Reinstalling as project after global correctly updates memory: project."""
+    def test_reinstall_global_to_project_keeps_memory_user(self):
+        """Reinstalling as project after global keeps memory: user."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root)
@@ -6623,8 +6827,8 @@ class MergeAgentScopeTests(unittest.TestCase):
             proj_content = (
                 project / ".claude" / "agents" / "hammer.mei.md"
             ).read_text()
-            self.assertIn("memory: project", proj_content)
-            self.assertNotIn("memory: user", proj_content)
+            self.assertIn("memory: user", proj_content)
+            self.assertNotIn("memory: project", proj_content)
 
 
 # ---------------------------------------------------------------------------
