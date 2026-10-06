@@ -307,37 +307,34 @@ fi
 # Older tamago installed OpenCode globals under ~/.opencode/. OpenCode still loads
 # that dir (it walks up from cwd looking for .opencode/), so leftovers load twice
 # next to ~/.config/opencode/. Warn only — never auto-delete.
-# Skipped when the project dir is $HOME: then ~/.opencode is that project's dir.
 LEGACY_OPENCODE_DIR="$HOME/.opencode"
-if [ "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" != "$(cd "$HOME" && pwd -P)" ]; then
-  LEGACY_FOUND=()
-  for f in .tamago-manifest.json .tamago-agent-manifest.json; do
-    [ -e "$LEGACY_OPENCODE_DIR/$f" ] && LEGACY_FOUND+=("$f")
-  done
-  # A manifest means tamago patched keys into the real opencode.json beside it;
-  # those keys stay loaded even after the manifest itself is deleted.
-  if [ ${#LEGACY_FOUND[@]} -gt 0 ] && [ -f "$LEGACY_OPENCODE_DIR/opencode.json" ] \
-     && [ ! -L "$LEGACY_OPENCODE_DIR/opencode.json" ]; then
-    LEGACY_FOUND+=("opencode.json(tamago-patched keys)")
+LEGACY_FOUND=()
+for f in .tamago-manifest.json .tamago-agent-manifest.json; do
+  [ -e "$LEGACY_OPENCODE_DIR/$f" ] && LEGACY_FOUND+=("$f")
+done
+# A manifest means tamago patched keys into the real opencode.json beside it;
+# those keys stay loaded even after the manifest itself is deleted.
+if [ ${#LEGACY_FOUND[@]} -gt 0 ] && [ -f "$LEGACY_OPENCODE_DIR/opencode.json" ] \
+   && [ ! -L "$LEGACY_OPENCODE_DIR/opencode.json" ]; then
+  LEGACY_FOUND+=("opencode.json(tamago-patched keys)")
+fi
+# Strip trailing slashes: setup.py writes link targets without them.
+_repo="${REPO%/}" _profile_repo="${PROFILE_REPO%/}"
+for p in "$LEGACY_OPENCODE_DIR"/*.json "$LEGACY_OPENCODE_DIR"/agents/* \
+         "$LEGACY_OPENCODE_DIR"/plugins/* "$LEGACY_OPENCODE_DIR"/skills/*; do
+  if [ -L "$p" ]; then
+    case "$(readlink "$p")" in
+      "$_repo"/*|"$_profile_repo"/*|"$HOME/.tamago"/*) LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}") ;;
+    esac
+  elif [ -f "$p" ] && grep -q "<!-- TAMAGO GENERATED" "$p" 2>/dev/null; then
+    LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}")
   fi
-  # Strip trailing slashes: setup.py writes link targets without them.
-  _repo="${REPO%/}" _profile_repo="${PROFILE_REPO%/}"
-  for p in "$LEGACY_OPENCODE_DIR"/*.json "$LEGACY_OPENCODE_DIR"/agents/* \
-           "$LEGACY_OPENCODE_DIR"/plugins/* "$LEGACY_OPENCODE_DIR"/skills/*; do
-    if [ -L "$p" ]; then
-      case "$(readlink "$p")" in
-        "$_repo"/*|"$_profile_repo"/*|"$HOME/.tamago"/*) LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}") ;;
-      esac
-    elif [ -f "$p" ] && grep -q "<!-- TAMAGO GENERATED" "$p" 2>/dev/null; then
-      LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}")
-    fi
-  done
-  if [ ${#LEGACY_FOUND[@]} -gt 0 ]; then
-    warn "~/.opencode (legacy tamago location)" \
-      "[WARNING] ${#LEGACY_FOUND[@]} leftover tamago item(s) OpenCode still loads (duplicates ~/.config/opencode): ${LEGACY_FOUND[*]} — remove them manually"
-  else
-    pass "~/.opencode (legacy tamago location)" "no leftovers"
-  fi
+done
+if [ ${#LEGACY_FOUND[@]} -gt 0 ]; then
+  warn "~/.opencode (legacy tamago location)" \
+    "[WARNING] ${#LEGACY_FOUND[@]} leftover tamago item(s) OpenCode still loads (duplicates ~/.config/opencode): ${LEGACY_FOUND[*]} — remove them manually"
+else
+  pass "~/.opencode (legacy tamago location)" "no leftovers"
 fi
 
 # ─── 4. Project Symlinks ──────────────────────────────────────────────────────

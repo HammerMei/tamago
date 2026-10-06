@@ -4337,13 +4337,14 @@ class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
             r = self._legacy_result(_run_health_check(project, tamago, home))
             self.assertEqual(r["status"], "pass")
 
-    def test_skipped_when_project_is_home(self):
-        """With --project $HOME, ~/.opencode is that project's own dir, not legacy."""
+    def test_runs_when_project_is_home(self):
+        """install-global runs health-check with --project $HOME; the check must still run."""
         with tempfile.TemporaryDirectory() as td:
             tamago, home, _ = self._env(Path(td))
             (home / ".opencode").mkdir()
             (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
-            self.assertIsNone(self._legacy_result(_run_health_check(home, tamago, home)))
+            r = self._legacy_result(_run_health_check(home, tamago, home))
+            self.assertEqual(r["status"], "warn")
 
 
 class HealthCheckSkillScopeTests(unittest.TestCase):
