@@ -4,7 +4,7 @@
 Commands
 --------
 install-global [--source <tamago>]
-    Patch global Claude/OpenCode settings in ~/.claude and ~/.opencode.
+    Patch global Claude/OpenCode settings in ~/.claude and ~/.config/opencode.
 install [--source <tamago>] [--config <path>]
     Install agents/skills into the current project from .tamago/tamago.conf.
     Auto-detects .tamago/tamago.conf in the current directory — create one
@@ -59,6 +59,10 @@ class Operation(str, Enum):
 # set ASSISTANT_SETUP_REPO=/path/to/tamago in your shell profile — tamago
 # will never auto-inject this variable.
 CONVENTIONAL_ROOT = Path("~/.tamago").expanduser()
+# OpenCode's global config dir (https://opencode.ai/docs/config/): opencode.json,
+# agents/, plugins/, skills/ all live here. Kept as an unexpanded string so tests
+# that patch Path.expanduser can redirect it.
+OPENCODE_GLOBAL_DIR = "~/.config/opencode"
 GITIGNORE_ENTRIES = (".claude", ".opencode", ".tamago/machine.env", ".tamago/machine.toml")
 
 
@@ -522,7 +526,7 @@ def write_machine_env(
 # survive re-installs cleanly.
 #
 # Scope routing (mirrors setup_skills):
-#   global agent  → patch ~/.claude/settings.json  + ~/.opencode/opencode.json
+#   global agent  → patch ~/.claude/settings.json  + ~/.config/opencode/opencode.json
 #   project agent → patch <project>/.claude/settings.json + <project>/.opencode/opencode.json
 #
 # Sidecar manifest (contribution blob format):
@@ -731,7 +735,7 @@ def setup_settings(
 
     Scope routing (mirrors setup_skills):
       install_globally=True  (global agent):
-        - agent settings merged into ~/.claude/settings.json and ~/.opencode/opencode.json
+        - agent settings merged into ~/.claude/settings.json and ~/.config/opencode/opencode.json
         - <project>/.claude/settings.json is NOT touched
       install_globally=False (project agent):
         - agent settings merged into <project>/.claude/settings.json and
@@ -779,8 +783,8 @@ def setup_settings(
     if install_globally:
         claude_settings_path = Path("~/.claude/settings.json").expanduser()
         claude_manifest_path = Path("~/.claude/.tamago-agent-manifest.json").expanduser()
-        opencode_settings_path = Path("~/.opencode/opencode.json").expanduser()
-        opencode_manifest_path = Path("~/.opencode/.tamago-agent-manifest.json").expanduser()
+        opencode_settings_path = Path(f"{OPENCODE_GLOBAL_DIR}/opencode.json").expanduser()
+        opencode_manifest_path = Path(f"{OPENCODE_GLOBAL_DIR}/.tamago-agent-manifest.json").expanduser()
         # Stale manifests at project scope (scope flip: project → global): clean up.
         _stale_claude_m  = project_root / ".claude"   / ".tamago-agent-manifest.json"
         _stale_opencode_m = project_root / ".opencode" / ".tamago-agent-manifest.json"
@@ -791,7 +795,7 @@ def setup_settings(
         opencode_manifest_path = project_root / ".opencode" / ".tamago-agent-manifest.json"
         # Stale manifests at global scope (scope flip: global → project): clean up.
         _stale_claude_m  = Path("~/.claude/.tamago-agent-manifest.json").expanduser()
-        _stale_opencode_m = Path("~/.opencode/.tamago-agent-manifest.json").expanduser()
+        _stale_opencode_m = Path(f"{OPENCODE_GLOBAL_DIR}/.tamago-agent-manifest.json").expanduser()
 
     # On install, clean up any stale contribution from the opposite scope first so a
     # scope flip (global ↔ project) doesn't leave the agent registered in two places.
@@ -823,7 +827,7 @@ def setup_settings(
 
         if install_globally:
             target_claude = Path("~/.claude").expanduser()
-            target_opencode = Path("~/.opencode").expanduser()
+            target_opencode = Path(OPENCODE_GLOBAL_DIR).expanduser()
         else:
             target_claude = project_root / ".claude"
             target_opencode = project_root / ".opencode"
@@ -1168,21 +1172,21 @@ def patch_global_settings(operation: Operation, source_root: Path) -> None:
 
 
 def patch_opencode_global_settings(operation: Operation, source_root: Path) -> None:
-    """Patch (or unpatch) ~/.opencode/opencode.json with tamago entries.
+    """Patch (or unpatch) ~/.config/opencode/opencode.json with tamago entries.
 
     Mirrors patch_global_settings() for OpenCode.  The key immediate benefit is
-    symlink migration: if ~/.opencode/opencode.json is currently a tamago symlink,
+    symlink migration: if ~/.config/opencode/opencode.json is currently a tamago symlink,
     install converts it to a real file so user-added OpenCode config (model prefs,
     provider settings, etc.) survives future 'tamago update' runs.
 
     OpenCode hooks live in the TypeScript plugin (memory-bootstrap.ts) rather than
     the JSON config, so no hooks or permissions are injected for now.  The sidecar
-    manifest at ~/.opencode/.tamago-manifest.json is still written so that uninstall
+    manifest at ~/.config/opencode/.tamago-manifest.json is still written so that uninstall
     can cleanly remove tamago's footprint even when future slices start injecting
     OpenCode-specific keys.
     """
-    settings_path = Path("~/.opencode/opencode.json").expanduser()
-    manifest_path = Path("~/.opencode/.tamago-manifest.json").expanduser()
+    settings_path = Path(f"{OPENCODE_GLOBAL_DIR}/opencode.json").expanduser()
+    manifest_path = Path(f"{OPENCODE_GLOBAL_DIR}/.tamago-manifest.json").expanduser()
 
     if operation == Operation.INSTALL:
         # Nothing to inject into opencode.json yet — but patch_settings() handles
@@ -1343,7 +1347,7 @@ def setup_agents(
     enabled_agents:    whitelist — only install agents whose name is in this set.
                        None means "install all" (only meaningful for direct callers bypassing
                        conf; conf-driven paths always pass a set).  Empty set installs nothing.
-    install_globally:  when True, install to ~/.claude/agents/ (and ~/.opencode/agents/)
+    install_globally:  when True, install to ~/.claude/agents/ (and ~/.config/opencode/agents/)
                        instead of the project-level agents dir.  Memory dirs follow the
                        same routing.  Use for the global-conf path (tamago install-global).
     On UNINSTALL: only agents in enabled_agents are removed (same whitelist as INSTALL).
@@ -1360,8 +1364,8 @@ def setup_agents(
     target_opencode_plugin_root = project_root / ".opencode" / "plugins"
 
     home_claude_agents = Path("~/.claude/agents").expanduser()
-    home_opencode_agents = Path("~/.opencode/agents").expanduser()
-    home_opencode_plugins = Path("~/.opencode/plugins").expanduser()
+    home_opencode_agents = Path(f"{OPENCODE_GLOBAL_DIR}/agents").expanduser()
+    home_opencode_plugins = Path(f"{OPENCODE_GLOBAL_DIR}/plugins").expanduser()
 
     # Route all agents to the same tier (global or project) — no per-agent routing.
     claude_agents_dir   = home_claude_agents   if install_globally else target_claude_agent_root
@@ -1562,7 +1566,7 @@ def setup_skills(
     """
 
     home_claude_skills = Path("~/.claude/skills").expanduser()
-    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    home_opencode_skills = Path(f"{OPENCODE_GLOBAL_DIR}/skills").expanduser()
     project_claude_skills = project_root / ".claude" / "skills"
     project_opencode_skills = project_root / ".opencode" / "skills"
 
@@ -1833,14 +1837,14 @@ def setup_external_skills(
 
     Processes only SkillEntry objects where source is a git URL (not
     "tamago" or "profile").  When install_globally=True, symlinks go into
-    ~/.claude/skills/ and ~/.opencode/skills/; otherwise they go under
+    ~/.claude/skills/ and ~/.config/opencode/skills/; otherwise they go under
     project_root/.claude/skills/ and project_root/.opencode/skills/.
     Returns 0 on success, 1 if any skill fails to clone, resolve, or link.
     """
     errors = 0
 
     home_claude_skills   = Path("~/.claude/skills").expanduser()
-    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    home_opencode_skills = Path(f"{OPENCODE_GLOBAL_DIR}/skills").expanduser()
     project_claude_skills   = project_root / ".claude"   / "skills"
     project_opencode_skills = project_root / ".opencode" / "skills"
     local_bin = Path("~/.local/bin").expanduser()
@@ -2114,7 +2118,7 @@ def _setup_bootstrap_skill(operation: Operation, source_root: Path) -> None:
     if not hatch_dir.is_dir():
         return
     home_claude_skills  = Path("~/.claude/skills").expanduser()
-    home_opencode_skills = Path("~/.opencode/skills").expanduser()
+    home_opencode_skills = Path(f"{OPENCODE_GLOBAL_DIR}/skills").expanduser()
     if operation == Operation.INSTALL:
         symlink_paths([hatch_dir], home_claude_skills)
         symlink_paths([hatch_dir], home_opencode_skills)
@@ -2124,7 +2128,7 @@ def _setup_bootstrap_skill(operation: Operation, source_root: Path) -> None:
 
 
 def setup_global(operation: Operation, source_root: Path) -> int:
-    """Home-level install: patch ~/.claude/settings.json, patch ~/.opencode/opencode.json,
+    """Home-level install: patch ~/.claude/settings.json, patch ~/.config/opencode/opencode.json,
     install tamago's own git hooks, bootstrap the hatch skill, and clean up any stale
     shell env entries from older tamago versions.
     Each step runs independently — one failure does not block the others."""
@@ -2606,7 +2610,7 @@ def _write_global_conf_template(path: Path) -> None:
     """
     template = (
         "# ~/.tamago/tamago.conf — global tamago configuration\n"
-        "# Items declared here are installed globally (→ ~/.claude/ and ~/.opencode/).\n"
+        "# Items declared here are installed globally (→ ~/.claude/ and ~/.config/opencode/).\n"
         "# Run 'tamago install-global' after editing this file.\n"
         "#\n"
         "# ── Skills ──────────────────────────────────────────────────────────────────\n"
@@ -2642,7 +2646,7 @@ def install_global_from_conf(
     items are installed (the template is entirely commented out).
 
     All agents/skills/plugins declared in the global conf are installed globally
-    (→ ~/.claude/ and ~/.opencode/); the ``scope`` field is ignored here because
+    (→ ~/.claude/ and ~/.config/opencode/); the ``scope`` field is ignored here because
     tier determines scope in the two-tier architecture.
     """
     errors: list[str] = []
@@ -2991,12 +2995,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "install-global",
-        help="symlink global settings to ~/.claude and ~/.opencode, update ~/.zshrc",
+        help="symlink global settings to ~/.claude and ~/.config/opencode, update ~/.zshrc",
         parents=[source_parser],
     )
     subparsers.add_parser(
         "uninstall-global",
-        help="remove global symlinks from ~/.claude and ~/.opencode",
+        help="remove global symlinks from ~/.claude and ~/.config/opencode",
         parents=[source_parser],
     )
     subparsers.add_parser(

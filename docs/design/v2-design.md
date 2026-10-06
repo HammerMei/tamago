@@ -360,7 +360,7 @@ skills from that source in one operation.
 
 | tamago.conf scope | Skills target |
 |-------------------|---------------|
-| `global`  | `~/.claude/skills/<name>/` and `~/.opencode/skills/<name>/` (symlink) |
+| `global`  | `~/.claude/skills/<name>/` and `~/.config/opencode/skills/<name>/` (symlink) |
 | `project` | `.claude/skills/<name>/` and `.opencode/skills/<name>/` (symlink) |
 
 Skills stay as **symlinks** (not copies) — skill directories coexist fine, no merge needed.
