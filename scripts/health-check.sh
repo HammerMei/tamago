@@ -14,6 +14,7 @@
 # ─── Path Resolution (mirrors memory-sync.sh) ─────────────────────────────────
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
+OPENCODE_GLOBAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"  # OpenCode honors XDG_CONFIG_HOME
 
 # ─── Args (parsed first so PROJECT_DIR is known for config resolution) ────────
 
@@ -295,12 +296,45 @@ fi
 section "3. Global Settings"
 
 check_patched "$HOME/.claude/settings.json"      "$HOME/.claude/.tamago-manifest.json"    "~/.claude/settings.json"
-check_patched "$HOME/.opencode/opencode.json"    "$HOME/.opencode/.tamago-manifest.json"  "~/.opencode/opencode.json"
+check_patched "$OPENCODE_GLOBAL_DIR/opencode.json"    "$OPENCODE_GLOBAL_DIR/.tamago-manifest.json"  "~/.config/opencode/opencode.json"
 
 # Agent-scoped settings (patch+merge, separate from tamago layer) — global agent only
 if [ "$HAS_PROFILE" = true ] && [ "$AGENT_SCOPE" = "global" ]; then
   check_patched "$HOME/.claude/settings.json"   "$HOME/.claude/.tamago-agent-manifest.json"   "~/.claude/settings.json (agent layer)"
-  check_patched "$HOME/.opencode/opencode.json" "$HOME/.opencode/.tamago-agent-manifest.json" "~/.opencode/opencode.json (agent layer)"
+  check_patched "$OPENCODE_GLOBAL_DIR/opencode.json" "$OPENCODE_GLOBAL_DIR/.tamago-agent-manifest.json" "~/.config/opencode/opencode.json (agent layer)"
+fi
+
+# Older tamago installed OpenCode globals under ~/.opencode/. OpenCode still loads
+# that dir (it walks up from cwd looking for .opencode/), so leftovers load twice
+# next to ~/.config/opencode/. Warn only — never auto-delete.
+LEGACY_OPENCODE_DIR="$HOME/.opencode"
+LEGACY_FOUND=()
+for f in .tamago-manifest.json .tamago-agent-manifest.json; do
+  [ -e "$LEGACY_OPENCODE_DIR/$f" ] && LEGACY_FOUND+=("$f")
+done
+# A manifest means tamago patched keys into the real opencode.json beside it.
+# Only detectable while the manifest exists, so name the file to edit now.
+if [ ${#LEGACY_FOUND[@]} -gt 0 ] && [ -f "$LEGACY_OPENCODE_DIR/opencode.json" ] \
+   && [ ! -L "$LEGACY_OPENCODE_DIR/opencode.json" ]; then
+  LEGACY_FOUND+=("opencode.json(edit out tamago keys, keep the file)")
+fi
+# Strip trailing slashes: setup.py writes link targets without them.
+_repo="${REPO%/}" _profile_repo="${PROFILE_REPO%/}"
+for p in "$LEGACY_OPENCODE_DIR"/*.json "$LEGACY_OPENCODE_DIR"/agents/* \
+         "$LEGACY_OPENCODE_DIR"/plugins/* "$LEGACY_OPENCODE_DIR"/skills/*; do
+  if [ -L "$p" ]; then
+    case "$(readlink "$p")" in
+      "$_repo"/*|"$_profile_repo"/*|"$HOME/.tamago"/*) LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}") ;;
+    esac
+  elif [ -f "$p" ] && grep -q "<!-- TAMAGO GENERATED" "$p" 2>/dev/null; then
+    LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}")
+  fi
+done
+if [ ${#LEGACY_FOUND[@]} -gt 0 ]; then
+  warn "~/.opencode (legacy tamago location)" \
+    "[WARNING] ${#LEGACY_FOUND[@]} leftover tamago item(s) OpenCode still loads (duplicates ~/.config/opencode): ${LEGACY_FOUND[*]} — remove them manually"
+else
+  pass "~/.opencode (legacy tamago location)" "no leftovers"
 fi
 
 # ─── 4. Project Symlinks ──────────────────────────────────────────────────────
@@ -467,7 +501,7 @@ PY
     # Tamago built-in agent: files are symlinks (not generated); no memory dir.
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_symlink "$HOME/.claude/agents/$AGENT_NAME.md"   "~/.claude/agents/$AGENT_NAME.md"
-      check_symlink "$HOME/.opencode/agents/$AGENT_NAME.md" "~/.opencode/agents/$AGENT_NAME.md"
+      check_symlink "$OPENCODE_GLOBAL_DIR/agents/$AGENT_NAME.md" "~/.config/opencode/agents/$AGENT_NAME.md"
     else
       check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"   ".claude/agents/$AGENT_NAME.md"
       check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md" ".opencode/agents/$AGENT_NAME.md"
@@ -479,7 +513,7 @@ PY
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
       check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
-      check_generated "$HOME/.opencode/agents/$AGENT_NAME.md"  "~/.opencode/agents/$AGENT_NAME.md"
+      check_generated "$OPENCODE_GLOBAL_DIR/agents/$AGENT_NAME.md"  "~/.config/opencode/agents/$AGENT_NAME.md"
       # Profile settings (e.g. agent-emojis.json) — also installed globally for global agents
       if [ -d "$PROFILE_REPO/settings/claude" ]; then
         for _json_file in "$PROFILE_REPO/settings/claude"/*.json; do

@@ -13,6 +13,15 @@ from pathlib import Path
 from unittest import mock
 
 
+# Home isolation — some tests only patch Path.home(), but Path.expanduser() reads
+# $HOME, so "~/..." paths in setup.py reached the developer's real home (e.g. the
+# live ~/.config/opencode/opencode.json). Point HOME at a throwaway dir for the
+# whole run, before setup.py is imported (it expands "~" at import time too).
+# Tests that need a specific home still patch HOME / expanduser themselves.
+_TEST_HOME = tempfile.mkdtemp(prefix="tamago_test_home_")
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+os.environ["HOME"] = _TEST_HOME
+
 MODULE_PATH = Path(__file__).with_name("setup.py")
 SPEC = importlib.util.spec_from_file_location("assistant_setup", MODULE_PATH)
 sm = importlib.util.module_from_spec(SPEC)
@@ -33,6 +42,13 @@ SPEC.loader.exec_module(sm)
 # silently redirected to a temporary file that is deleted at process exit.
 # Tests that explicitly pass their own registry_path are unaffected.
 # ---------------------------------------------------------------------------
+
+# XDG isolation — the OpenCode global dir is $XDG_CONFIG_HOME/opencode when set.
+# That path is absolute, so it bypasses the "~" redirection tests rely on (patched
+# Path.expanduser / HOME) and would hit the developer's real config. Clear it for
+# the whole run; subprocesses (health-check.sh) inherit the cleared env. Tests that
+# exercise XDG set it explicitly.
+os.environ.pop("XDG_CONFIG_HOME", None)
 
 _REAL_REGISTRY = sm.KNOWN_PROJECTS_FILE
 _REGISTRY_TMPDIR = tempfile.mkdtemp(prefix="tamago_test_registry_")
@@ -1780,11 +1796,11 @@ class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
             ),
         ):
             # Override the hardcoded paths inside patch_opencode_global_settings
-            # by patching Path so that ~/.opencode/... resolves to our temp dirs.
+            # by patching Path so that ~/.config/opencode/... resolves to our temp dirs.
             pass  # we call directly with mocked internals below
 
     def test_install_migrates_symlink_to_real_file(self):
-        """~/.opencode/opencode.json symlink is replaced with a real file on install."""
+        """~/.config/opencode/opencode.json symlink is replaced with a real file on install."""
         with tempfile.TemporaryDirectory() as td:
             import json as _json
             source_root = Path(td) / "tamago"
@@ -2674,30 +2690,35 @@ class SetupExternalSkillsTests(unittest.TestCase):
             mock_clone.assert_not_called()
 
     def test_install_globally_installs_to_home_claude(self):
-        """install_globally=True installs into ~/.claude/skills/ and ~/.opencode/skills/."""
+        """install_globally=True installs into ~/.claude/skills/ and ~/.config/opencode/skills/."""
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             skill_dir = Path(td) / "cloned-skill-dir"
             skill_dir.mkdir()
             skill = self._make_skill("my-skill", "https://example.com/skill.git")
-            with mock.patch.object(
-                sm, "_resolve_external_skill_dir", return_value=skill_dir
+            home = Path(td) / "home"
+            orig_expanduser = Path.expanduser
+
+            def fake_expanduser(self):
+                s = str(self)
+                return Path(str(home) + s[1:]) if s.startswith("~") else orig_expanduser(self)
+
+            with (
+                mock.patch.object(sm, "_resolve_external_skill_dir", return_value=skill_dir),
+                mock.patch.object(Path, "expanduser", fake_expanduser),
             ):
                 rc = sm.setup_external_skills(
                     sm.Operation.INSTALL, [skill], project, install_globally=True
                 )
             self.assertEqual(rc, 0)
             # Must be installed globally, not in the project dir
-            global_claude   = Path("~/.claude/skills/my-skill").expanduser()
-            global_opencode = Path("~/.opencode/skills/my-skill").expanduser()
+            global_claude   = home / ".claude" / "skills" / "my-skill"
+            global_opencode = home / ".config" / "opencode" / "skills" / "my-skill"
             self.assertTrue(global_claude.is_symlink())
             self.assertTrue(global_opencode.is_symlink())
             self.assertEqual(global_claude.resolve(), skill_dir.resolve())
             # Must NOT be installed at project scope
             self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
-            # Cleanup
-            global_claude.unlink()
-            global_opencode.unlink()
 
     def test_url_skill_linked_with_skill_name(self):
         """URL skill is cloned and symlinked under skill.name (not the hash dir name)."""
@@ -4099,7 +4120,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             project = root / "project"
             home_claude_agents = root / "home" / ".claude" / "agents"
-            home_opencode_agents = root / "home" / ".opencode" / "agents"
+            home_opencode_agents = root / "home" / ".config" / "opencode" / "agents"
 
             # Patch the home dir expansion inside setup_agents
             orig_expanduser = Path.expanduser
@@ -4129,7 +4150,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
             self.assertFalse((project / ".claude" / "agents" / "hammer.mei.md").exists())
 
     def test_global_opencode_plugins_go_to_home_not_project(self):
-        """OpenCode plugins with install_globally=True land at ~/.opencode/plugins/, not project_root/.opencode/plugins/."""
+        """OpenCode plugins with install_globally=True land at ~/.config/opencode/plugins/, not project_root/.opencode/plugins/."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, [])
@@ -4139,7 +4160,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             project = root / "project"
             home_root = root / "home"
-            home_opencode_plugins = home_root / ".opencode" / "plugins"
+            home_opencode_plugins = home_root / ".config" / "opencode" / "plugins"
 
             orig_expanduser = Path.expanduser
 
@@ -4157,10 +4178,10 @@ class GlobalAgentScopeTests(unittest.TestCase):
                     install_globally=True,
                 )
 
-            # Plugin must be at ~/.opencode/plugins/, NOT at project/.opencode/plugins/
+            # Plugin must be at ~/.config/opencode/plugins/, NOT at project/.opencode/plugins/
             self.assertTrue(
                 (home_opencode_plugins / "my-plugin.ts").is_symlink(),
-                "Expected plugin symlink at ~/.opencode/plugins/ for global install",
+                "Expected plugin symlink at ~/.config/opencode/plugins/ for global install",
             )
             self.assertFalse(
                 (project / ".opencode" / "plugins" / "my-plugin.ts").exists(),
@@ -4168,7 +4189,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
             )
 
     def test_uninstall_global_opencode_plugins_removes_from_home(self):
-        """Uninstalling with install_globally=True removes plugins from ~/.opencode/plugins/."""
+        """Uninstalling with install_globally=True removes plugins from ~/.config/opencode/plugins/."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = self._make_source(root, [])
@@ -4177,7 +4198,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             project = root / "project"
             home_root = root / "home"
-            home_opencode_plugins = home_root / ".opencode" / "plugins"
+            home_opencode_plugins = home_root / ".config" / "opencode" / "plugins"
             home_opencode_plugins.mkdir(parents=True)
             # Pre-place a symlink as if install already ran
             (home_opencode_plugins / "my-plugin.ts").symlink_to(plugin_dir / "my-plugin.ts")
@@ -4200,7 +4221,7 @@ class GlobalAgentScopeTests(unittest.TestCase):
 
             self.assertFalse(
                 (home_opencode_plugins / "my-plugin.ts").exists(),
-                "Uninstall should remove plugin from ~/.opencode/plugins/",
+                "Uninstall should remove plugin from ~/.config/opencode/plugins/",
             )
 
 
@@ -4243,6 +4264,87 @@ def _skill_result(data: dict, name: str) -> str | None:
         if name in r.get("name", ""):
             return r["status"]
     return None
+
+
+class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
+    """health-check warns about tamago leftovers in the legacy ~/.opencode/ dir.
+
+    OpenCode still loads ~/.opencode/ (it walks up from cwd for .opencode/), so
+    leftovers from older tamago installs duplicate ~/.config/opencode/.
+    """
+
+    LEGACY = "~/.opencode (legacy tamago location)"
+
+    def _legacy_result(self, data: dict) -> dict | None:
+        return next((r for r in data.get("results", []) if r["name"] == self.LEGACY), None)
+
+    def _env(self, root: Path) -> tuple[Path, Path, Path]:
+        tamago, home, project = root / "tamago", root / "home", root / "project"
+        for d in (tamago, home, project):
+            d.mkdir()
+        return tamago, home, project
+
+    def test_warns_on_tamago_leftovers_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            profile = Path(td) / "profile"
+            profile.mkdir()
+            legacy = home / ".opencode"
+            for sub in ("agents", "plugins", "skills"):
+                (legacy / sub).mkdir(parents=True)
+            (legacy / ".tamago-manifest.json").write_text("{}")
+            (legacy / "opencode.json").write_text('{"default_agent": "hammer.mei"}')
+            (legacy / "agents" / "gen.md").write_text("<!-- TAMAGO GENERATED -->\n")
+            (legacy / "plugins" / "memory-bootstrap.ts").symlink_to(tamago / "x.ts")
+            (legacy / "skills" / "from-profile").symlink_to(profile / "skills" / "p")
+            (legacy / "skills" / "from-cache").symlink_to(home / ".tamago" / "repo-cache" / "c")
+            (legacy / "agent-emojis.json").symlink_to(profile / "agent-emojis.json")
+            (legacy / "agents" / "mine.md").symlink_to(Path(td) / "elsewhere.md")
+            (legacy / "agents" / "hand.md").write_text("my own agent\n")
+
+            r = self._legacy_result(_run_health_check(project, tamago, home, profile))
+
+            self.assertEqual(r["status"], "warn")
+            self.assertTrue(r["msg"].startswith("[WARNING] 7 "), r["msg"])
+            for item in (".tamago-manifest.json", "opencode.json(edit out tamago keys, keep the file)",
+                         "agents/gen.md", "plugins/memory-bootstrap.ts",
+                         "skills/from-profile", "skills/from-cache", "agent-emojis.json"):
+                self.assertIn(item, r["msg"])
+            for item in ("mine.md", "hand.md"):
+                self.assertNotIn(item, r["msg"])
+
+    def test_opencode_json_symlink_and_trailing_slash_repo(self):
+        """A tamago opencode.json symlink is flagged even if ASSISTANT_SETUP_REPO ends in '/'."""
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            legacy = home / ".opencode"
+            legacy.mkdir()
+            (legacy / "opencode.json").symlink_to(tamago / "settings" / "opencode" / "opencode.json")
+
+            profile = Path(td) / "profile"  # separate, so only the $REPO arm can match
+            r = self._legacy_result(_run_health_check(
+                project, tamago, home, profile,
+                extra_env={"ASSISTANT_SETUP_REPO": f"{tamago}/"}))
+
+            self.assertEqual(r["status"], "warn")
+            self.assertTrue(r["msg"].startswith("[WARNING] 1 "), r["msg"])
+            self.assertIn("opencode.json", r["msg"])
+            self.assertNotIn("edit out tamago keys", r["msg"])
+
+    def test_passes_when_no_legacy_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            r = self._legacy_result(_run_health_check(project, tamago, home))
+            self.assertEqual(r["status"], "pass")
+
+    def test_runs_when_project_is_home(self):
+        """install-global runs health-check with --project $HOME; the check must still run."""
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, _ = self._env(Path(td))
+            (home / ".opencode").mkdir()
+            (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+            r = self._legacy_result(_run_health_check(home, tamago, home))
+            self.assertEqual(r["status"], "warn")
 
 
 class HealthCheckSkillScopeTests(unittest.TestCase):
@@ -4338,8 +4440,8 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
         # fake tamago-manifest so global settings check passes
         (home / ".claude").mkdir(parents=True)
         (home / ".claude" / ".tamago-manifest.json").write_text("{}")
-        (home / ".opencode").mkdir(parents=True)
-        (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+        (home / ".config" / "opencode").mkdir(parents=True)
+        (home / ".config" / "opencode" / ".tamago-manifest.json").write_text("{}")
         # profile memory dir
         (profile / "agents" / "memory" / agent_name).mkdir(parents=True)
         (project / ".claude" / "agent-memory").mkdir(parents=True)
@@ -4424,8 +4526,8 @@ class HealthCheckSkillScopeTests(unittest.TestCase):
             (home / ".claude" / "agents").mkdir(parents=True)
             agent_md = home / ".claude" / "agents" / "test-agent.md"
             agent_md.write_text("<!-- TAMAGO GENERATED -->\n")
-            (home / ".opencode" / "agents").mkdir(parents=True)
-            (home / ".opencode" / "agents" / "test-agent.md").write_text("<!-- TAMAGO GENERATED -->\n")
+            (home / ".config" / "opencode" / "agents").mkdir(parents=True)
+            (home / ".config" / "opencode" / "agents" / "test-agent.md").write_text("<!-- TAMAGO GENERATED -->\n")
             (home / ".claude" / "agent-memory").mkdir(parents=True)
             (home / ".claude" / "agent-memory" / "test-agent").symlink_to(
                 profile / "agents" / "memory" / "test-agent"
@@ -4591,8 +4693,8 @@ printf '%s' "{{\"msg\":\"$escaped\"}}"
         # Home dirs + manifests
         (home / ".claude").mkdir(parents=True)
         (home / ".claude" / ".tamago-manifest.json").write_text("{}")
-        (home / ".opencode").mkdir(parents=True)
-        (home / ".opencode" / ".tamago-manifest.json").write_text("{}")
+        (home / ".config" / "opencode").mkdir(parents=True)
+        (home / ".config" / "opencode" / ".tamago-manifest.json").write_text("{}")
 
         # machine.env pointing to profile
         (home / ".tamago").mkdir(parents=True)
@@ -5405,8 +5507,10 @@ class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
                     sm.Operation.INSTALL, source
                 )
 
-            manifest = root / "home" / ".opencode" / ".tamago-manifest.json"
+            manifest = root / "home" / ".config" / "opencode" / ".tamago-manifest.json"
             self.assertTrue(manifest.exists())
+            # OpenCode's global config dir is ~/.config/opencode/, not ~/.opencode/ (https://opencode.ai/docs/config/).
+            self.assertFalse((root / "home" / ".opencode").exists())
 
     def test_uninstall_removes_opencode_manifest(self):
         with tempfile.TemporaryDirectory() as td:
@@ -5419,7 +5523,7 @@ class PatchOpencodeGlobalSettingsTests(unittest.TestCase):
                 sm.patch_opencode_global_settings(
                     sm.Operation.INSTALL, source
                 )
-                manifest = root / "home" / ".opencode" / ".tamago-manifest.json"
+                manifest = root / "home" / ".config" / "opencode" / ".tamago-manifest.json"
                 self.assertTrue(manifest.exists())
 
                 sm.patch_opencode_global_settings(
@@ -5723,7 +5827,7 @@ class SetupGlobalTests(unittest.TestCase):
                     sm.setup_global(sm.Operation.INSTALL, source)
 
             self.assertTrue((fake_home / ".claude" / "skills" / "hatch").is_symlink())
-            self.assertTrue((fake_home / ".opencode" / "skills" / "hatch").is_symlink())
+            self.assertTrue((fake_home / ".config" / "opencode" / "skills" / "hatch").is_symlink())
 
     def test_uninstall_global_removes_hatch_skill_symlink(self):
         """setup_global UNINSTALL removes the globally-installed hatch symlink."""
@@ -7200,6 +7304,47 @@ class SetupSettingsScopeTests(unittest.TestCase):
             self.assertNotIn("agent", global_data, "stale global contribution not cleaned up")
             project_data = json.loads((project / ".claude" / "settings.json").read_text())
             self.assertEqual(project_data["agent"], "hammer.mei")
+
+    def _install_global_opencode_settings(self, td: Path, env: dict) -> None:
+        project = td / "project"
+        project.mkdir()
+        source = td / "source"
+        (source / "settings" / "opencode").mkdir(parents=True)
+        profile = self._make_profile(td, claude_settings={"agent": "hammer.mei"})
+        with mock.patch.dict(os.environ, env):
+            if "XDG_CONFIG_HOME" not in env:
+                os.environ.pop("XDG_CONFIG_HOME", None)  # restored by patch.dict
+            sm.setup_settings(sm.Operation.INSTALL, source, project, profile_root=profile,
+                              install_globally=True, agent_name="hammer.mei")
+
+    def test_global_agent_opencode_settings_written_to_config_dir(self):
+        """Global agent settings land in ~/.config/opencode/, never ~/.opencode/."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            fake_home = td / "home"
+            fake_home.mkdir()
+            self._install_global_opencode_settings(td, {"HOME": str(fake_home)})
+
+            oc_dir = fake_home / ".config" / "opencode"
+            data = json.loads((oc_dir / "opencode.json").read_text())
+            self.assertEqual(data["default_agent"], "hammer.mei")
+            self.assertTrue((oc_dir / ".tamago-agent-manifest.json").exists())
+            self.assertFalse((fake_home / ".opencode").exists())
+
+    def test_global_agent_opencode_settings_honor_xdg_config_home(self):
+        """OpenCode resolves its global dir from $XDG_CONFIG_HOME; tamago must too."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            fake_home = td / "home"
+            fake_home.mkdir()
+            xdg = td / "xdg"
+            self._install_global_opencode_settings(
+                td, {"HOME": str(fake_home), "XDG_CONFIG_HOME": str(xdg)}
+            )
+
+            data = json.loads((xdg / "opencode" / "opencode.json").read_text())
+            self.assertEqual(data["default_agent"], "hammer.mei")
+            self.assertFalse((fake_home / ".config" / "opencode").exists())
 
     def test_no_agent_name_skips_agent_pointer(self):
         """When agent_name is None, no 'agent' key is written (silently skipped)."""
