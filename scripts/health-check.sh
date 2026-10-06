@@ -14,6 +14,7 @@
 # ─── Path Resolution (mirrors memory-sync.sh) ─────────────────────────────────
 
 REPO="${ASSISTANT_SETUP_REPO:-$HOME/.tamago}"
+OPENCODE_GLOBAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"  # OpenCode honors XDG_CONFIG_HOME
 
 # ─── Args (parsed first so PROJECT_DIR is known for config resolution) ────────
 
@@ -295,12 +296,12 @@ fi
 section "3. Global Settings"
 
 check_patched "$HOME/.claude/settings.json"      "$HOME/.claude/.tamago-manifest.json"    "~/.claude/settings.json"
-check_patched "$HOME/.config/opencode/opencode.json"    "$HOME/.config/opencode/.tamago-manifest.json"  "~/.config/opencode/opencode.json"
+check_patched "$OPENCODE_GLOBAL_DIR/opencode.json"    "$OPENCODE_GLOBAL_DIR/.tamago-manifest.json"  "~/.config/opencode/opencode.json"
 
 # Agent-scoped settings (patch+merge, separate from tamago layer) — global agent only
 if [ "$HAS_PROFILE" = true ] && [ "$AGENT_SCOPE" = "global" ]; then
   check_patched "$HOME/.claude/settings.json"   "$HOME/.claude/.tamago-agent-manifest.json"   "~/.claude/settings.json (agent layer)"
-  check_patched "$HOME/.config/opencode/opencode.json" "$HOME/.config/opencode/.tamago-agent-manifest.json" "~/.config/opencode/opencode.json (agent layer)"
+  check_patched "$OPENCODE_GLOBAL_DIR/opencode.json" "$OPENCODE_GLOBAL_DIR/.tamago-agent-manifest.json" "~/.config/opencode/opencode.json (agent layer)"
 fi
 
 # ─── 4. Project Symlinks ──────────────────────────────────────────────────────
@@ -467,7 +468,7 @@ PY
     # Tamago built-in agent: files are symlinks (not generated); no memory dir.
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_symlink "$HOME/.claude/agents/$AGENT_NAME.md"   "~/.claude/agents/$AGENT_NAME.md"
-      check_symlink "$HOME/.config/opencode/agents/$AGENT_NAME.md" "~/.config/opencode/agents/$AGENT_NAME.md"
+      check_symlink "$OPENCODE_GLOBAL_DIR/agents/$AGENT_NAME.md" "~/.config/opencode/agents/$AGENT_NAME.md"
     else
       check_symlink "$PROJECT_DIR/.claude/agents/$AGENT_NAME.md"   ".claude/agents/$AGENT_NAME.md"
       check_symlink "$PROJECT_DIR/.opencode/agents/$AGENT_NAME.md" ".opencode/agents/$AGENT_NAME.md"
@@ -479,7 +480,7 @@ PY
     if [ "$AGENT_SCOPE" = "global" ]; then
       check_generated "$HOME/.claude/agents/$AGENT_NAME.md"    "~/.claude/agents/$AGENT_NAME.md"
       check_symlink   "$HOME/.claude/agent-memory/$AGENT_NAME" "~/.claude/agent-memory/$AGENT_NAME"
-      check_generated "$HOME/.config/opencode/agents/$AGENT_NAME.md"  "~/.config/opencode/agents/$AGENT_NAME.md"
+      check_generated "$OPENCODE_GLOBAL_DIR/agents/$AGENT_NAME.md"  "~/.config/opencode/agents/$AGENT_NAME.md"
       # Profile settings (e.g. agent-emojis.json) — also installed globally for global agents
       if [ -d "$PROFILE_REPO/settings/claude" ]; then
         for _json_file in "$PROFILE_REPO/settings/claude"/*.json; do

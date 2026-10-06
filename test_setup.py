@@ -2680,24 +2680,29 @@ class SetupExternalSkillsTests(unittest.TestCase):
             skill_dir = Path(td) / "cloned-skill-dir"
             skill_dir.mkdir()
             skill = self._make_skill("my-skill", "https://example.com/skill.git")
-            with mock.patch.object(
-                sm, "_resolve_external_skill_dir", return_value=skill_dir
+            home = Path(td) / "home"
+            orig_expanduser = Path.expanduser
+
+            def fake_expanduser(self):
+                s = str(self)
+                return Path(str(home) + s[1:]) if s.startswith("~") else orig_expanduser(self)
+
+            with (
+                mock.patch.object(sm, "_resolve_external_skill_dir", return_value=skill_dir),
+                mock.patch.object(Path, "expanduser", fake_expanduser),
             ):
                 rc = sm.setup_external_skills(
                     sm.Operation.INSTALL, [skill], project, install_globally=True
                 )
             self.assertEqual(rc, 0)
             # Must be installed globally, not in the project dir
-            global_claude   = Path("~/.claude/skills/my-skill").expanduser()
-            global_opencode = Path("~/.config/opencode/skills/my-skill").expanduser()
+            global_claude   = home / ".claude" / "skills" / "my-skill"
+            global_opencode = home / ".config" / "opencode" / "skills" / "my-skill"
             self.assertTrue(global_claude.is_symlink())
             self.assertTrue(global_opencode.is_symlink())
             self.assertEqual(global_claude.resolve(), skill_dir.resolve())
             # Must NOT be installed at project scope
             self.assertFalse((project / ".claude" / "skills" / "my-skill").exists())
-            # Cleanup
-            global_claude.unlink()
-            global_opencode.unlink()
 
     def test_url_skill_linked_with_skill_name(self):
         """URL skill is cloned and symlinked under skill.name (not the hash dir name)."""
@@ -7202,6 +7207,47 @@ class SetupSettingsScopeTests(unittest.TestCase):
             self.assertNotIn("agent", global_data, "stale global contribution not cleaned up")
             project_data = json.loads((project / ".claude" / "settings.json").read_text())
             self.assertEqual(project_data["agent"], "hammer.mei")
+
+    def _install_global_opencode_settings(self, td: Path, env: dict) -> None:
+        project = td / "project"
+        project.mkdir()
+        source = td / "source"
+        (source / "settings" / "opencode").mkdir(parents=True)
+        profile = self._make_profile(td, claude_settings={"agent": "hammer.mei"})
+        with mock.patch.dict(os.environ, env):
+            if "XDG_CONFIG_HOME" not in env:
+                os.environ.pop("XDG_CONFIG_HOME", None)  # restored by patch.dict
+            sm.setup_settings(sm.Operation.INSTALL, source, project, profile_root=profile,
+                              install_globally=True, agent_name="hammer.mei")
+
+    def test_global_agent_opencode_settings_written_to_config_dir(self):
+        """Global agent settings land in ~/.config/opencode/, never ~/.opencode/."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            fake_home = td / "home"
+            fake_home.mkdir()
+            self._install_global_opencode_settings(td, {"HOME": str(fake_home)})
+
+            oc_dir = fake_home / ".config" / "opencode"
+            data = json.loads((oc_dir / "opencode.json").read_text())
+            self.assertEqual(data["default_agent"], "hammer.mei")
+            self.assertTrue((oc_dir / ".tamago-agent-manifest.json").exists())
+            self.assertFalse((fake_home / ".opencode").exists())
+
+    def test_global_agent_opencode_settings_honor_xdg_config_home(self):
+        """OpenCode resolves its global dir from $XDG_CONFIG_HOME; tamago must too."""
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            fake_home = td / "home"
+            fake_home.mkdir()
+            xdg = td / "xdg"
+            self._install_global_opencode_settings(
+                td, {"HOME": str(fake_home), "XDG_CONFIG_HOME": str(xdg)}
+            )
+
+            data = json.loads((xdg / "opencode" / "opencode.json").read_text())
+            self.assertEqual(data["default_agent"], "hammer.mei")
+            self.assertFalse((fake_home / ".config" / "opencode").exists())
 
     def test_no_agent_name_skips_agent_pointer(self):
         """When agent_name is None, no 'agent' key is written (silently skipped)."""
