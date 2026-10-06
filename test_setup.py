@@ -4306,7 +4306,7 @@ class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
 
             self.assertEqual(r["status"], "warn")
             self.assertTrue(r["msg"].startswith("[WARNING] 7 "), r["msg"])
-            for item in (".tamago-manifest.json", "opencode.json(tamago-patched keys)",
+            for item in (".tamago-manifest.json", "opencode.json(edit out tamago keys, keep the file)",
                          "agents/gen.md", "plugins/memory-bootstrap.ts",
                          "skills/from-profile", "skills/from-cache", "agent-emojis.json"):
                 self.assertIn(item, r["msg"])
@@ -4329,7 +4329,7 @@ class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
             self.assertEqual(r["status"], "warn")
             self.assertTrue(r["msg"].startswith("[WARNING] 1 "), r["msg"])
             self.assertIn("opencode.json", r["msg"])
-            self.assertNotIn("tamago-patched keys", r["msg"])
+            self.assertNotIn("edit out tamago keys", r["msg"])
 
     def test_passes_when_no_legacy_dir(self):
         with tempfile.TemporaryDirectory() as td:

@@ -312,11 +312,11 @@ LEGACY_FOUND=()
 for f in .tamago-manifest.json .tamago-agent-manifest.json; do
   [ -e "$LEGACY_OPENCODE_DIR/$f" ] && LEGACY_FOUND+=("$f")
 done
-# A manifest means tamago patched keys into the real opencode.json beside it;
-# those keys stay loaded even after the manifest itself is deleted.
+# A manifest means tamago patched keys into the real opencode.json beside it.
+# Only detectable while the manifest exists, so name the file to edit now.
 if [ ${#LEGACY_FOUND[@]} -gt 0 ] && [ -f "$LEGACY_OPENCODE_DIR/opencode.json" ] \
    && [ ! -L "$LEGACY_OPENCODE_DIR/opencode.json" ]; then
-  LEGACY_FOUND+=("opencode.json(tamago-patched keys)")
+  LEGACY_FOUND+=("opencode.json(edit out tamago keys, keep the file)")
 fi
 # Strip trailing slashes: setup.py writes link targets without them.
 _repo="${REPO%/}" _profile_repo="${PROFILE_REPO%/}"
