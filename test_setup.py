@@ -4760,6 +4760,33 @@ printf '%s' "{{\"msg\":\"$escaped\"}}"
             )
 
 
+    def test_project_home_checks_agents_at_global_paths(self):
+        """--project $HOME reads ~/.tamago/tamago.conf (the global conf, no `scope`).
+
+        setup.py installs those agents globally, so OpenCode agents live in
+        ~/.config/opencode/agents/. health-check must look there — not at
+        $HOME/.opencode/agents/ as if $HOME were a project.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tamago, profile, home, project = self._setup_builtin_agent_env(root, "code-reviewer")
+            fake_source = tamago / "agents" / "code-reviewer.md"
+            fake_source.parent.mkdir(parents=True, exist_ok=True)
+            fake_source.write_text("# code-reviewer\n")
+            for agents_dir in (home / ".claude" / "agents", home / ".config" / "opencode" / "agents"):
+                agents_dir.mkdir(parents=True, exist_ok=True)
+                (agents_dir / "code-reviewer.md").symlink_to(fake_source)
+
+            data = _run_health_check(project, tamago, home, profile)
+
+            agent_rows = {r["name"]: r["status"] for r in data["results"]
+                          if "code-reviewer" in r["name"]}
+            self.assertEqual(agent_rows, {
+                "~/.claude/agents/code-reviewer.md": "pass",
+                "~/.config/opencode/agents/code-reviewer.md": "pass",
+            })
+
+
 class SkillScopeRoutingTests(unittest.TestCase):
     """Tests for setup_skills scope routing: tamago built-ins vs profile skills vs agent scope."""
 
