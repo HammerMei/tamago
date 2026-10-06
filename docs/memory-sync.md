@@ -17,9 +17,13 @@ Two memory layers:
 | **Shared** | `agents/memory/<name>/` | All machines, all instances |
 | **Env-specific** | `agents/memory/<name>/env-<hostname>/` | Local to this machine |
 
-> The `.claude/agent-memory/<name>/` path inside your project is a **symlink** created by
-> `tamago install`. It points into the real profile repo so Claude Code can read/write through it
-> without permission prompts, while git tracks the actual path.
+> `~/.claude/agent-memory/<name>/` is a **symlink** created by `tamago install`. It points into
+> the real profile repo so Claude Code can read/write through it, while git tracks the actual
+> path. Generated agents always use `memory: user`: Claude Code does not auto-load project-scope
+> memory through a symlink that resolves outside the project. Project installs also keep a
+> `.claude/agent-memory/<name>/` link in the project for the OpenCode memory plugin.
+> Agent names must be unique per machine; install fails if the home link already points to
+> another profile.
 
 ---
 
