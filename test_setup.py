@@ -34,6 +34,13 @@ SPEC.loader.exec_module(sm)
 # Tests that explicitly pass their own registry_path are unaffected.
 # ---------------------------------------------------------------------------
 
+# XDG isolation — the OpenCode global dir is $XDG_CONFIG_HOME/opencode when set.
+# That path is absolute, so it bypasses the "~" redirection tests rely on (patched
+# Path.expanduser / HOME) and would hit the developer's real config. Clear it for
+# the whole run; subprocesses (health-check.sh) inherit the cleared env. Tests that
+# exercise XDG set it explicitly.
+os.environ.pop("XDG_CONFIG_HOME", None)
+
 _REAL_REGISTRY = sm.KNOWN_PROJECTS_FILE
 _REGISTRY_TMPDIR = tempfile.mkdtemp(prefix="tamago_test_registry_")
 _TEST_REGISTRY = Path(_REGISTRY_TMPDIR) / "known-projects.json"
@@ -4271,23 +4278,49 @@ class HealthCheckLegacyOpencodeDirTests(unittest.TestCase):
     def test_warns_on_tamago_leftovers_only(self):
         with tempfile.TemporaryDirectory() as td:
             tamago, home, project = self._env(Path(td))
+            profile = Path(td) / "profile"
+            profile.mkdir()
             legacy = home / ".opencode"
-            (legacy / "agents").mkdir(parents=True)
-            (legacy / "plugins").mkdir()
+            for sub in ("agents", "plugins", "skills"):
+                (legacy / sub).mkdir(parents=True)
             (legacy / ".tamago-manifest.json").write_text("{}")
+            (legacy / "opencode.json").write_text('{"default_agent": "hammer.mei"}')
             (legacy / "agents" / "gen.md").write_text("<!-- TAMAGO GENERATED -->\n")
             (legacy / "plugins" / "memory-bootstrap.ts").symlink_to(tamago / "x.ts")
+            (legacy / "skills" / "from-profile").symlink_to(profile / "skills" / "p")
+            (legacy / "skills" / "from-cache").symlink_to(home / ".tamago" / "repo-cache" / "c")
+            (legacy / "agent-emojis.json").symlink_to(profile / "agent-emojis.json")
             (legacy / "agents" / "mine.md").symlink_to(Path(td) / "elsewhere.md")
             (legacy / "agents" / "hand.md").write_text("my own agent\n")
 
-            r = self._legacy_result(_run_health_check(project, tamago, home))
+            r = self._legacy_result(_run_health_check(project, tamago, home, profile))
 
             self.assertEqual(r["status"], "warn")
-            self.assertTrue(r["msg"].startswith("[WARNING] 3 "), r["msg"])
-            for item in (".tamago-manifest.json", "agents/gen.md", "plugins/memory-bootstrap.ts"):
+            self.assertTrue(r["msg"].startswith("[WARNING] 7 "), r["msg"])
+            for item in (".tamago-manifest.json", "opencode.json(tamago-patched keys)",
+                         "agents/gen.md", "plugins/memory-bootstrap.ts",
+                         "skills/from-profile", "skills/from-cache", "agent-emojis.json"):
                 self.assertIn(item, r["msg"])
             for item in ("mine.md", "hand.md"):
                 self.assertNotIn(item, r["msg"])
+
+    def test_opencode_json_symlink_and_trailing_slash_repo(self):
+        """A tamago opencode.json symlink is flagged even if ASSISTANT_SETUP_REPO ends in '/'."""
+        with tempfile.TemporaryDirectory() as td:
+            tamago, home, project = self._env(Path(td))
+            legacy = home / ".opencode"
+            legacy.mkdir()
+            (legacy / "opencode.json").symlink_to(tamago / "settings" / "opencode" / "opencode.json")
+
+            profile = Path(td) / "profile"  # separate, so only the $REPO arm can match
+            r = self._legacy_result(_run_health_check(
+                project, tamago, home, profile,
+                extra_env={"ASSISTANT_SETUP_REPO": f"{tamago}/"}))
+
+            self.assertEqual(r["status"], "warn")
+            self.assertTrue(r["msg"].startswith("[WARNING] 1 "), r["msg"])
+            self.assertIn("opencode.json", r["msg"])
+            self.assertNotIn("tamago-patched keys", r["msg"])
 
     def test_passes_when_no_legacy_dir(self):
         with tempfile.TemporaryDirectory() as td:

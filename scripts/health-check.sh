@@ -314,10 +314,19 @@ if [ "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" != "$(cd "$HOME" && pwd -P)" ]
   for f in .tamago-manifest.json .tamago-agent-manifest.json; do
     [ -e "$LEGACY_OPENCODE_DIR/$f" ] && LEGACY_FOUND+=("$f")
   done
-  for p in "$LEGACY_OPENCODE_DIR"/agents/* "$LEGACY_OPENCODE_DIR"/plugins/* "$LEGACY_OPENCODE_DIR"/skills/*; do
+  # A manifest means tamago patched keys into the real opencode.json beside it;
+  # those keys stay loaded even after the manifest itself is deleted.
+  if [ ${#LEGACY_FOUND[@]} -gt 0 ] && [ -f "$LEGACY_OPENCODE_DIR/opencode.json" ] \
+     && [ ! -L "$LEGACY_OPENCODE_DIR/opencode.json" ]; then
+    LEGACY_FOUND+=("opencode.json(tamago-patched keys)")
+  fi
+  # Strip trailing slashes: setup.py writes link targets without them.
+  _repo="${REPO%/}" _profile_repo="${PROFILE_REPO%/}"
+  for p in "$LEGACY_OPENCODE_DIR"/*.json "$LEGACY_OPENCODE_DIR"/agents/* \
+           "$LEGACY_OPENCODE_DIR"/plugins/* "$LEGACY_OPENCODE_DIR"/skills/*; do
     if [ -L "$p" ]; then
       case "$(readlink "$p")" in
-        "$REPO"/*|"$PROFILE_REPO"/*|"$HOME/.tamago"/*) LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}") ;;
+        "$_repo"/*|"$_profile_repo"/*|"$HOME/.tamago"/*) LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}") ;;
       esac
     elif [ -f "$p" ] && grep -q "<!-- TAMAGO GENERATED" "$p" 2>/dev/null; then
       LEGACY_FOUND+=("${p#"$LEGACY_OPENCODE_DIR"/}")
